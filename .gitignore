@@ -1,0 +1,24 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+
+# Runtime data
+chats/
+receipts/
+
+# Backups & archives
+backups/
+
+# Temporary / artifact files
+*.patch
+patch.log
+server-patched.js
+cat
+
+# OS
+.DS_Store
+Thumbs.db

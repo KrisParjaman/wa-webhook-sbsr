@@ -1,0 +1,51 @@
+{
+  "store": {
+    "name": "Sentuh Rasa - Risoles Otentik",
+    "mascot": "Mintu",
+    "location": "Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jatinegara, Jakarta Timur",
+    "kurir": ["Gojek (1-2 jam)", "Grab", "Pickup Langsung"],
+    "addons": [
+      { "name": "Chili Sauce 50ml", "price": 4000, "id": "chili_sauce" },
+      { "name": "Thermal Bag", "price": 15000, "id": "thermal_bag" }
+    ]
+  },
+  "categories": [
+    {
+      "id": "goreng",
+      "name": "Risoles Goreng (Makan Langsung)",
+      "description": "Risoles yang sudah digoreng, siap makan langsung.",
+      "variants": [
+        { "id": "ori_goreng", "name": "Original", "slug": "original", "aliases": ["original","ori","klasik","classic"], "description": "Risoles original isian ayam sayur klasik.", "prices": { "6":28000, "12":52000, "18":75000 }, "tags": ["best seller","halal"] },
+        { "id": "as_goreng", "name": "Ayam Sayur", "slug": "ayam-sayur", "aliases": ["ayam sayur","ayam","as"], "description": "Risoles isian ayam dan sayur segar.", "prices": { "6":30000, "12":55000, "18":78000 }, "tags": ["halal"] },
+        { "id": "sb_goreng", "name": "Smoked Beef", "slug": "smoked-beef", "aliases": ["smoked beef","smoked","sb","sapi asap"], "description": "Risoles isian smoked beef premium.", "prices": { "6":33000, "12":60000, "18":85000 }, "tags": ["premium"] },
+        { "id": "cc_goreng", "name": "Creamy Chicken", "slug": "creamy-chicken", "aliases": ["creamy chicken","creamy","cc","ayam creamy"], "description": "Risoles isian ayam creamy gurih.", "prices": { "6":33000, "12":60000, "18":85000 }, "tags": ["premium","favorite"] }
+      ],
+      "default_qty": "6"
+    },
+    {
+      "id": "frozen",
+      "name": "Risoles Frozen (Stock - 12pcs/pack)",
+      "description": "Risoles mentah beku, tinggal goreng sendiri. 1 pack = 12 pcs.",
+      "variants": [
+        { "id": "ori_frozen", "name": "Original Frozen", "slug": "original-frozen", "aliases": ["original frozen","ori frozen"], "prices": { "12":90000 }, "tags": ["halal","stock"] },
+        { "id": "as_frozen", "name": "Ayam Sayur Frozen", "slug": "ayam-sayur-frozen", "aliases": ["ayam sayur frozen","as frozen"], "prices": { "12":96000 }, "tags": ["halal","stock"] },
+        { "id": "sb_frozen", "name": "Smoked Beef Frozen", "slug": "smoked-beef-frozen", "aliases": ["smoked beef frozen","sb frozen"], "prices": { "12":105000 }, "tags": ["premium","stock"] },
+        { "id": "cc_frozen", "name": "Creamy Chicken Frozen", "slug": "creamy-chicken-frozen", "aliases": ["creamy chicken frozen","cc frozen"], "prices": { "12":105000 }, "tags": ["premium","stock"] },
+        { "id": "mixed_frozen", "name": "Mixed Frozen", "slug": "mixed-frozen", "aliases": ["mixed frozen","campur frozen","mix frozen"], "description": "Paket campur 2 varian dalam 1 pack.", "prices": { "12":100000 }, "tags": ["best seller","stock","variasi"] }
+      ],
+      "default_qty": "12"
+    }
+  ],
+  "faq": [
+    {"q":"Dimana lokasi Sentuh Rasa?","a":"Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jatinegara, Jakarta Timur"},
+    {"q":"Apa aja kurir yang tersedia?","a":"Gojek (1-2 jam), Grab, dan pickup langsung"},
+    {"q":"Minimal order berapa?","a":"Minimal 6 pcs untuk goreng, 1 pack (12 pcs) untuk frozen"},
+    {"q":"Ada add-on apa aja?","a":"Chili Sauce 50ml Rp4.000 dan Thermal Bag Rp15.000"},
+    {"q":"Apakah halal?","a":"InsyaAllah semua produk Sentuh Rasa halal dan berkualitas"},
+    {"q":"Bisa bayar pake apa?","a":"Transfer bank (BCA, Mandiri, BRI) atau E-Wallet (GoPay, OVO, Dana)"},
+    {"q":"Berapa lama frozen bisa tahan?","a":"1-2 bulan di freezer. Goreng langsung tanpa thawing."},
+    {"q":"Cara goreng risoles frozen?","a":"Goreng langsung dari frozen dengan minyak panas sedang."}
+  ],
+  "version": "1.0",
+  "last_updated": "2026-05-15"
+}
