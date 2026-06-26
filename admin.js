@@ -351,21 +351,23 @@ const HTML = `<!doctype html>
   .attach-popup.open{display:flex}
   .attach-popup button{background:none;border:0;padding:11px 16px;text-align:left;cursor:pointer;font-size:13px;color:#3b4a54;display:flex;align-items:center;gap:10px;transition:background .1s;width:100%}
   .attach-popup button:hover{background:#f5f6f6}
-  #imgPreview{width:100%;padding:6px 10px;background:#fff;display:none;flex-direction:column;align-items:flex-start;gap:6px;border-bottom:1px solid #e9edef}
-#imgPreview.active{display:flex}
-.img-preview-wrap{position:relative;display:flex;align-items:flex-start;gap:10px;width:100%}
-.img-preview-wrap img{max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db;flex-shrink:0}
-.img-preview-wrap .img-info{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
-.img-preview-wrap .img-info .img-filename{font-size:12px;color:#3b4a54;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.img-preview-wrap .img-info .img-label{font-size:11px;color:#667781}
-.doc-preview-wrap{display:flex;align-items:center;gap:10px;width:100%}
-.doc-icon{width:44px;height:44px;border-radius:8px;background:#e3f0ff;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0}
-.doc-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
-.doc-info .doc-filename{font-size:12px;color:#3b4a54;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.doc-info .doc-size{font-size:11px;color:#667781}
-  .img-cancel{width:24px;height:24px;border-radius:50%;border:0;background:#ef5350;color:#fff;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0}
-  .img-cancel:hover{background:#d32f2f}
-  .img-label{font-size:11px;color:#667781;white-space:nowrap}
+  /* ── Attachment preview area (WhatsApp-style) ── */
+  #imgPreview{width:100%;padding:12px 16px 10px;background:#e2ddd5;display:none;flex-direction:column;align-items:center;gap:6px;border-bottom:1px solid #c8c4be}
+  #imgPreview.active{display:flex}
+  /* Image preview — large centered thumbnail with × overlay */
+  .img-preview-wa{position:relative;display:inline-flex;flex-direction:column;align-items:center;gap:5px;max-width:100%}
+  .img-preview-wa img{max-height:240px;max-width:min(320px,100%);border-radius:8px;object-fit:contain;box-shadow:0 2px 10px rgba(0,0,0,.22);display:block}
+  .img-remove{position:absolute;top:-9px;right:-9px;width:22px;height:22px;border-radius:50%;border:2px solid #e2ddd5;background:rgba(0,0,0,.58);color:#fff;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1}
+  .img-remove:hover{background:rgba(0,0,0,.82)}
+  .img-caption-name{font-size:11px;color:#54656f;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+  /* Document preview — white card */
+  .doc-preview-card{background:#fff;border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;width:100%;max-width:380px;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+  .doc-icon{width:40px;height:40px;border-radius:8px;background:#e8f0fe;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+  .doc-info{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+  .doc-info .doc-filename{font-size:13px;color:#111b21;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .doc-info .doc-size{font-size:11px;color:#667781}
+  .doc-remove{width:24px;height:24px;border-radius:50%;border:0;background:transparent;color:#8696a0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0;line-height:1}
+  .doc-remove:hover{color:#111b21}
 </style></head>
 <body><div id="app">
   <div id="sidebar">
@@ -479,22 +481,21 @@ function renderAttachmentPreview() {
   el.style.display = "flex";
   el.style.flexDirection = "column";
   if (pendingAttachment.type === "image" && pendingAttachment.preview) {
-    el.innerHTML = '<div class="img-preview-wrap">'
-      + '<img src="' + pendingAttachment.preview + '" style="max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db">'
-      + '<div class="img-info">'
-        + '<span class="img-filename">' + (pendingAttachment.file.name || "Image") + '</span>'
-        + '<span class="img-label">' + fmtFileSize(pendingAttachment.file.size) + '</span>'
-        + '<button class="img-cancel" onclick="cancelAttachment()" title="Remove">&times; Remove</button>'
-      + '</div>'
+    // WhatsApp-style: large centered image, × overlay top-right, filename below
+    el.innerHTML = '<div class="img-preview-wa">'
+      + '<img src="' + pendingAttachment.preview + '" alt="preview">'
+      + '<button class="img-remove" onclick="cancelAttachment()" title="Hapus">&times;</button>'
+      + '<span class="img-caption-name">' + (pendingAttachment.file.name || "Image") + ' &middot; ' + fmtFileSize(pendingAttachment.file.size) + '</span>'
     + '</div>';
   } else if (pendingAttachment.type === "document") {
-    el.innerHTML = '<div class="doc-preview-wrap">'
+    // White card: icon · name/size · × button
+    el.innerHTML = '<div class="doc-preview-card">'
       + '<div class="doc-icon">' + docEmoji(pendingAttachment.file.name) + '</div>'
       + '<div class="doc-info">'
         + '<span class="doc-filename">' + (pendingAttachment.file.name || "Document") + '</span>'
         + '<span class="doc-size">' + fmtFileSize(pendingAttachment.file.size) + '</span>'
       + '</div>'
-      + '<button class="img-cancel" onclick="cancelAttachment()" title="Remove">&times;</button>'
+      + '<button class="doc-remove" onclick="cancelAttachment()" title="Hapus">&times;</button>'
     + '</div>';
   } else {
     el.style.display = "none";
