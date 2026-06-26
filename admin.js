@@ -1243,9 +1243,12 @@ setInterval(async () => {
   var prCnt = lastMsgCount[activePhone || ""] || 0;
   await loadChats();
   if (!activePhone) return;
-  // Don't rebuild the chat panel if the user is composing a message
+  // Don't rebuild if user is composing
   var _ta = document.querySelector("#composer textarea");
   if (_ta && (_ta.value.trim() || document.activeElement === _ta)) return;
+  // Don't rebuild if a video is currently playing
+  var _vid = document.querySelector("#thread video");
+  if (_vid && !_vid.paused) return;
 
   // Check if new messages arrived
   var chat = allChats.find(function(c) { return c.phone === activePhone; });
@@ -1253,13 +1256,15 @@ setInterval(async () => {
   lastMsgCount[activePhone] = newCnt;
   var hasNewMsgs = newCnt > prCnt && prCnt > 0;
 
-  // Re-render only if user is at bottom or no history
+  // Skip DOM rebuild entirely if there are no new messages
+  if (!hasNewMsgs) return;
+
   var pv = scrollState[activePhone] || {};
   var atBottom = pv.wasAtBottom !== false;
 
-  if (hasNewMsgs && !atBottom) {
-    // New msgs but user reading history — toast only
-    toast("[New message from " + (chat ? (chat.name || "+" + chat.phone) : activePhone) + "]");
+  if (!atBottom) {
+    // New msgs but user reading history — toast only, don't disrupt scroll
+    toast("\\uD83D\\uDCAC New message from " + (chat ? (chat.name || "+" + chat.phone) : activePhone));
   } else {
     openChat(activePhone);
   }
