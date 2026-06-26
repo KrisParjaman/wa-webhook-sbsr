@@ -1536,7 +1536,12 @@ async function uploadMediaToWhatsApp(filePath, mimeType) {
       let data = ""; res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
         if (res.statusCode >= 200 && res.statusCode < 300) { const parsed = JSON.parse(data); resolve(parsed.id); }
-        else { log("wa-upload", "Error " + res.statusCode + ": " + data); reject(new Error("Media upload error " + res.statusCode)); }
+        else {
+          log("wa-upload", "Error " + res.statusCode + ": " + data);
+          let waMsg = "Media upload error " + res.statusCode;
+          try { const e = JSON.parse(data); waMsg = (e.error && (e.error.message || e.error.error_user_msg)) ? e.error.message : waMsg; } catch (_) {}
+          reject(new Error(waMsg));
+        }
       });
     });
     req.on("error", reject); req.write(bodyBuffer); req.end();
@@ -10672,17 +10677,36 @@ app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) 
 });
 
 // --- Admin: send document via WhatsApp (base64 JSON) ---
+// MIME types accepted by WA Cloud API for documents (derived server-side from extension
+// so we don't trust whatever the browser reports — Chrome/Safari often send
+// application/octet-stream for non-standard extensions).
+const WA_DOC_MIME = {
+  pdf:  "application/pdf",
+  doc:  "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls:  "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt:  "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt:  "text/plain",
+  zip:  "application/zip",
+  csv:  "text/csv",
+  rar:  "application/octet-stream",
+};
 app.post("/admin-send-document", express.json({ limit: "110mb" }), async (req, res) => {
   log("admin-send-document", "REQUEST received");
   try {
-    const { phone, file_base64, mime_type, filename: origFilename, caption } = req.body;
+    const { phone, file_base64, filename: origFilename, caption } = req.body;
     if (!phone) return res.status(400).json({ error: "missing phone" });
     if (!file_base64) return res.status(400).json({ error: "missing file_base64" });
     const buf = Buffer.from(file_base64, "base64");
-    const mime = mime_type || "application/octet-stream";
 
     // Sanitize filename — keep only safe chars
     const safeFilename = (origFilename || "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").slice(0, 120);
+    // Derive MIME from extension (server-side, more reliable than browser-reported type)
+    const ext = safeFilename.split(".").pop().toLowerCase();
+    const mime = WA_DOC_MIME[ext] || "application/octet-stream";
+
     const storedFilename = "ADMIN-DOC-" + Date.now() + "-" + safeFilename;
     const uploadDir = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads";
     try { if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true }); } catch (_) {}
@@ -10690,7 +10714,7 @@ app.post("/admin-send-document", express.json({ limit: "110mb" }), async (req, r
     fs.writeFileSync(filePath, buf);
     const fileUrl = "https://production.biks.ai/receipts/" + storedFilename;
 
-    // Upload to WhatsApp then send as document
+    log("admin-send-document", "uploading " + safeFilename + " mime=" + mime + " size=" + buf.length);
     var mediaId = await uploadMediaToWhatsApp(filePath, mime);
     await sendWhatsAppDocument(phone, mediaId, safeFilename, caption || "");
 
