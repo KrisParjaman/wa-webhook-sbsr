@@ -1339,6 +1339,36 @@ async function sendWhatsAppInteractiveButtons(to, bodyText, buttons) {
   });
 }
 
+async function sendWhatsAppLocationRequest(to, bodyText) {
+  const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
+  const truncated = String(bodyText || "").slice(0, 1020);
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "location_request_message",
+      body: { text: truncated },
+      action: { name: "send_location" },
+    },
+  };
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => {
+      let data = ""; res.on("data", (c) => data += c);
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+        else { log("wa-location-request", "Error " + res.statusCode + ": " + data); reject(new Error("WA location-request error " + res.statusCode)); }
+      });
+    });
+    req.on("error", reject); req.write(body); req.end();
+  });
+}
+
 function getSbsrFinancePhones() {
   const raw = (process.env.SBSR_FINANCE_PHONES || "").split(",").map(s => s.replace(/[^0-9]/g, "")).filter(Boolean);
   const out = [];
@@ -2172,6 +2202,17 @@ const SBSR_CHECKOUT_COLLECTION_STATES = new Set([
   "awaiting_address", "awaiting_pin_confirm", "awaiting_courier_choice", "awaiting_meeting_package_confirm",
   "awaiting_location_retry",
 ]);
+
+// Wrong-input detection: location states where customer must send a
+// Maps URL or WhatsApp native location. Anything else triggers LLM
+// guidance + WhatsApp Location Request Message with "Send Location" button.
+const WRONG_INPUT_LOCATION_STATES = new Set([
+  "awaiting_address",
+  "awaiting_pin_confirm",
+  "awaiting_location_retry",
+  "awaiting_location",
+]);
+
 const SBSR_CHECKOUT_LOCK_STATES = new Set([
   "awaiting_invoice_confirm", "awaiting_proof", "pending_finance",
   "approved", "booked", "delivered", "cancelled",
@@ -6178,6 +6219,134 @@ async function tryHandleAddressTextCapture(from, userText) {
   return false;
 }
 
+// ============================================================
+// Wrong-input detection for location-requiring checkout states
+// ============================================================
+// When customer is in awaiting_address, awaiting_pin_confirm,
+// awaiting_location_retry, or awaiting_location and sends
+// anything other than a valid location input, this interceptor
+// uses OpenClaw to detect the wrong input and generate a
+// natural, patient guidance reply. The reply is sent as a
+// WhatsApp Location Request Message — an interactive message
+// with a "Send Location" button that opens WhatsApp's native
+// location-sharing UI.
+// ============================================================
+async function tryHandleWrongInputInLocationStates(from, userText) {
+  // --- Gate 1: Only fire for location-requiring states ---
+  const draft = loadSbsrDraft(from);
+  if (!draft) return false;
+  const state = String(draft.state || "").trim().toLowerCase();
+  if (!WRONG_INPUT_LOCATION_STATES.has(state)) return false;
+
+  // --- Gate 2: Don't intercept if text is empty ---
+  // (empty text from sticker/video/contacts falls through to OOC handler)
+  const t = String(userText || "").trim();
+  if (!t || t.length < 1) return false;
+
+  // --- Gate 3: Pass through for obviously valid location inputs ---
+  // Maps URLs are handled by tryHandleAddressAndQuote / tryHandleBareMapsUrl
+  if (MAPS_URL_RE.test(t)) return false;
+
+  // Short confirm/deny in awaiting_pin_confirm is handled by tryHandlePinConfirm
+  if (state === "awaiting_pin_confirm") {
+    if (PIN_CONFIRM_YES_RE.test(t) || PIN_CONFIRM_NO_RE.test(t)) return false;
+  }
+
+  // Address-like text should pass through to tryHandleAddressTextCapture
+  if (state === "awaiting_address" && looksLikeAddress(t)) return false;
+
+  // --- Gate 4: Skip synthetic/system messages ---
+  if (isSyntheticMsg(t)) return false;
+
+  // --- Gate 5: LLM detection + response generation ---
+  // Build a prompt that asks OpenClaw to judge whether this input makes
+  // sense for the current location state and, if not, craft a natural
+  // human-like guidance reply.
+  const stateNudge = getStateNudgeText(state);
+  const stateLabel = state.replace(/_/g, " ");
+
+  const detectionPrompt = [
+    "[DETEKSI SALAH INPUT LOKASI]",
+    "Kamu adalah detektor yang menilai apakah pesan customer MASUK AKAL sebagai input lokasi/alamat atau TIDAK.",
+    "",
+    "KONTEKS:",
+    "- Customer sedang di tahap: " + stateLabel,
+    "- Yang diharapkan dari customer: " + stateNudge,
+    "- Balasan kamu akan dikirim sebagai WhatsApp LOCATION REQUEST MESSAGE — pesan interaktif dengan tombol 'Send Location' yang langsung membuka UI share lokasi WhatsApp",
+    "- Customer tinggal TAP tombol itu untuk langsung share lokasi",
+    "",
+    "TUGAS KAMU:",
+    "1. Nilai apakah pesan customer ini bisa dianggap sebagai input lokasi/alamat yang valid.",
+    "   - VALID: alamat teks lengkap, link Google Maps, petunjuk alamat, koordinat, lokasi",
+    "   - TIDAK VALID: stiker, foto random, chat kosong/tidak jelas, pertanyaan, curhat, kirim dokumen, video, testing, spam, emoji saja, dsb.",
+    "2. Jika TIDAK VALID, buat balasan SABAR & MANUSIAWI dalam Bahasa Indonesia yang:",
+    "   a. Menjelaskan dengan ramah bahwa Mintu butuh lokasi/alamat untuk lanjut pesanan",
+    "   b. Mengarahkan customer untuk TAP TOMBOL 'Send Location' di bawah pesan ini",
+    "   c. BISA juga sebut alternatif: kirim link Google Maps atau share lokasi via fitur WhatsApp",
+    "   d. Nada: ramah, sabar, seperti manusia beneran — BUKAN robot customer service",
+    "   e. JANGAN terlalu panjang (maks 2-3 kalimat pendek)",
+    "   f. JANGAN menyebut kata 'sistem', 'bot', 'detektor', atau 'deteksi'",
+    "   g. JANGAN sebut 'tekan tombol di bawah' kalau tidak natural — variasikan (bisa: 'tap tombol lokasi di bawah', 'klik kirim lokasi', dsb.)",
+    "   h. SELALU akhiri dengan mengajak kirim lokasi",
+    "",
+    "FORMAT RESPON (JSON SAJA, tanpa markdown):",
+    "{",
+    '  "is_wrong_input": true atau false,',
+    '  "reply": "balasan natural dalam Bahasa Indonesia (hanya jika is_wrong_input=true)"',
+    "}",
+    "",
+    "PESAN CUSTOMER:",
+    t,
+  ].join("\n");
+
+  try {
+    const llmResult = await sendToOpenClaw(
+      "wrong-input-" + Date.now() + "-" + from,
+      detectionPrompt
+    );
+
+    if (!llmResult || !String(llmResult).trim()) {
+      log("sbsr-wrong-input", "empty LLM response for " + from);
+      return false;
+    }
+
+    let parsed;
+    try {
+      const cleaned = String(llmResult)
+        .replace(/```json\s*/g, "")
+        .replace(/```\s*/g, "")
+        .trim();
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      log("sbsr-wrong-input", "JSON parse failed: " + e.message + " raw=" + String(llmResult).slice(0, 100));
+      return false;
+    }
+
+    if (!parsed || !parsed.is_wrong_input) {
+      log("sbsr-wrong-input", "LLM judged NOT wrong input for " + from + " state=" + state);
+      return false;
+    }
+
+    const reply = String(parsed.reply || "").trim();
+    if (!reply || reply.length < 5) {
+      log("sbsr-wrong-input", "LLM returned is_wrong_input=true but empty/short reply");
+      return false;
+    }
+
+    // --- Send Location Request Message with LLM-generated body text ---
+    // The interactive "Send Location" button opens WhatsApp's native
+    // location-sharing UI. When customer shares, it arrives as a regular
+    // location webhook → handled by tryHandleWhatsAppLocation.
+    await sendWhatsAppLocationRequest(from, reply);
+    log("sbsr-wrong-input", "location-request sent to " + from + " state=" + state + " body=" + reply.slice(0, 100));
+
+    return true;
+  } catch (e) {
+    log("sbsr-wrong-input", "error: " + e.message);
+    return false; // fail-open: let normal flow handle it
+  }
+}
+
 async function tryHandleWhatsAppLocation(from, location) {
   if (!location) return false;
   const lat = Number(location.latitude);
@@ -9962,6 +10131,12 @@ async function handleMessage(msg, contacts) {
         log("intercept", "tryHandlePinConfirm " + from);
         sendReaction(from, messageId, "").catch(() => {});
         log("sbsr-pin-confirm", "Handled pin confirm, skipping LLM");
+        return;
+      }
+      if (await tryHandleWrongInputInLocationStates(from, userText)) {
+        log("intercept", "tryHandleWrongInputInLocationStates " + from);
+        sendReaction(from, messageId, "").catch(() => {});
+        log("sbsr-wrong-input", "Handled wrong input in location state, skipping LLM");
         return;
       }
       if (await tryHandleAddressPinConfirm(from, userText)) {
