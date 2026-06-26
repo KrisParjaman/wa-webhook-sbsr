@@ -10680,6 +10680,12 @@ app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) 
 // MIME types accepted by WA Cloud API for documents (derived server-side from extension
 // so we don't trust whatever the browser reports — Chrome/Safari often send
 // application/octet-stream for non-standard extensions).
+// WA Cloud API accepted document MIME types (from the API error message):
+// audio/aac|mp4|mpeg|amr|ogg|opus, application/pdf, text/plain,
+// application/msword, application/vnd.ms-excel, application/vnd.ms-powerpoint,
+// application/vnd.openxmlformats-officedocument.{wordprocessingml.document,
+//   presentationml.presentation, spreadsheetml.sheet}
+// NOTE: text/csv and application/x-rar-compressed are NOT supported.
 const WA_DOC_MIME = {
   pdf:  "application/pdf",
   doc:  "application/msword",
@@ -10689,9 +10695,8 @@ const WA_DOC_MIME = {
   ppt:  "application/vnd.ms-powerpoint",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   txt:  "text/plain",
+  csv:  "text/plain",   // WA rejects text/csv — send as text/plain
   zip:  "application/zip",
-  csv:  "text/csv",
-  rar:  "application/octet-stream",
 };
 app.post("/admin-send-document", express.json({ limit: "110mb" }), async (req, res) => {
   log("admin-send-document", "REQUEST received");

@@ -865,7 +865,7 @@ function renderThread(chat) {
 
   var docInput = document.createElement("input");
   docInput.type = "file"; docInput.id = "docUpload";
-  docInput.accept = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv";
+  docInput.accept = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.csv";
   docInput.style.display = "none"; docInput.onchange = onDocumentSelected;
   comp.appendChild(docInput);
 
