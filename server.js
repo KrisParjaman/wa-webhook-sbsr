@@ -2410,6 +2410,33 @@ function getSbsrDeterministicMissingStateMessage(from, draft) {
   return "Sebentar ya Kak, Mintu lagi lanjut cek ongkir dulu 🤍";
 }
 
+// Proactive location prompt: when draft state is in a location-requiring state,
+// send via WhatsApp interactive Location Request Message (with "Send Location"
+// button) instead of plain text. For awaiting_address, only use the button when
+// the customer hasn't shared a destination yet — if they've already shared a
+// pin but we just need the typed address, plain text is more appropriate.
+async function sendSbsrLocationPromptMessage(from, draft, bodyText) {
+  const st = String(draft?.state || "").trim().toLowerCase();
+  if (!WRONG_INPUT_LOCATION_STATES.has(st)) {
+    return sendWhatsAppMessage(from, bodyText);
+  }
+  // awaiting_pin_confirm: customer is supposed to reply YA/NO, not share new location.
+  // Sending a location button here would be confusing.
+  if (st === "awaiting_pin_confirm") {
+    return sendWhatsAppMessage(from, bodyText);
+  }
+  // awaiting_address: only send location button if no destination coordinates yet.
+  // If customer already shared a pin but address text is missing, the prompt is
+  // asking for typed address — plain text is the right medium.
+  if (st === "awaiting_address") {
+    const hasDest = sbsrDraftHasDestination(draft) || !!(draft.gmaps_link || (draft.destination && draft.destination.gmaps_link));
+    if (hasDest) {
+      return sendWhatsAppMessage(from, bodyText);
+    }
+  }
+  return sendWhatsAppLocationRequest(from, bodyText);
+}
+
 function shouldBlockSbsrCheckoutEnglishReply(from, text) {
   if (!text || !SBSR_CHECKOUT_ENGLISH_GUARD_RE.test(String(text))) return false;
   const draft = loadSbsrDraft(from);
@@ -3317,12 +3344,9 @@ async function tryHandleAddressAndQuote(from, userText) {
     const _rDraft = loadSbsrDraft(from) || draft;
     saveSbsrDraft(from, { ..._rDraft, state: "awaiting_location_retry" });
     try {
-      await sendWhatsAppMessage(from,
+      await sendWhatsAppLocationRequest(from,
         "Kak, titik Maps tadi belum bisa kebaca sistem 🙏\n" +
-        "Boleh coba:\n" +
-        "1. Share lokasi langsung dari WhatsApp\n" +
-        "2. Kirim ulang link Google Maps\n" +
-        "3. Kirim screenshot titik lokasi"
+        "Boleh coba tap tombol *Send Location* di bawah buat share lokasi langsung dari WhatsApp, atau kirim ulang link Google Maps ya"
       );
     } catch (e) { log("sbsr-addr-quote", "maps-retry-prompt err: " + e.message); }
     return true;
@@ -4265,7 +4289,7 @@ async function tryHandleAddressPinConfirm(from, userText) {
         },
       });
       log("sbsr-address-pin-confirm", "selected=typed_address");
-      await sendWhatsAppMessage(from, "Siap Kak 🤍 berarti Mintu pakai alamat tertulisnya ya.\n\nBoleh kirim titik lokasi yang sesuai area alamat tersebut biar ongkirnya bisa dicek 😊");
+      await sendWhatsAppLocationRequest(from, "Siap Kak 🤍 berarti Mintu pakai alamat tertulisnya ya.\n\nTap tombol *Send Location* di bawah buat share titik lokasi yang sesuai area alamat tersebut biar ongkirnya bisa dicek 😊");
       return true;
     }
     if (isOpt2) {
@@ -4289,7 +4313,7 @@ async function tryHandleAddressPinConfirm(from, userText) {
         pending_address_text: conf.address_text || draft.pending_address_text || draft.address_text || null,
       });
       log("sbsr-address-pin-confirm", "selected=new_pin");
-      await sendWhatsAppMessage(from, "Siap Kak 🤍 silakan kirim pin lokasi / Google Maps yang sesuai alamat pengirimannya ya 😊");
+      await sendWhatsAppLocationRequest(from, "Siap Kak 🤍 silakan tap tombol *Send Location* di bawah buat share pin lokasi yang sesuai alamat pengirimannya ya 😊");
       return true;
     }
     if (isOpt3) {
@@ -4358,7 +4382,7 @@ async function tryHandleAddressPinConfirm(from, userText) {
     };
     saveSbsrDraft(from, next);
     log("sbsr-address-pin-confirm", "selected=new_pin");
-    await sendWhatsAppMessage(from, "Siap Kak 🤍 silakan kirim pin lokasi / Google Maps yang sesuai alamat pengirimannya ya 😊");
+    await sendWhatsAppLocationRequest(from, "Siap Kak 🤍 silakan tap tombol *Send Location* di bawah buat share pin lokasi yang sesuai alamat pengirimannya ya 😊");
     return true;
   }
   if (isOpt3) {
@@ -5354,9 +5378,9 @@ async function tryHandleNameCapture(from, userText) {
 
   if (!hasMapsOrLocation) {
     try {
-      await sendWhatsAppMessage(
+      await sendWhatsAppLocationRequest(
         from,
-        "Makasih Kak, namanya sudah Mintu catat 🤍\nBoleh kirim pin lokasi (Share Location WhatsApp / link Google Maps) ya biar Mintu lanjut cek ongkir."
+        "Makasih Kak, namanya sudah Mintu catat 🤍\nTap tombol *Send Location* di bawah buat share lokasi langsung, atau kirim link Google Maps ya biar Mintu lanjut cek ongkir."
       );
     } catch (e) { log("sbsr-name-capture", "prompt maps err: " + e.message); }
   }
@@ -5398,9 +5422,9 @@ async function tryHandleAwaitingNameMultilineEarly(from, userText) {
   const hasCoords = Number.isFinite(Number(nextDraft.destination?.lat)) && Number.isFinite(Number(nextDraft.destination?.lng));
   if (!hasCoords) {
     try {
-      await sendWhatsAppMessage(
+      await sendWhatsAppLocationRequest(
         from,
-        `Siap Kak ${name}, alamatnya sudah Mintu catat ya 🤍 Boleh kirim pin lokasi dari Google Maps atau Share Location WhatsApp untuk konfirmasi?`
+        `Siap Kak ${name}, alamatnya sudah Mintu catat ya 🤍 Tap tombol *Send Location* di bawah buat share lokasi langsung, atau kirim link Google Maps untuk konfirmasi ya`
       );
     } catch (e) { log("sbsr-name-capture", "prompt maps err: " + e.message); }
     log("sbsr-name-capture", "handled=true");
@@ -6227,14 +6251,14 @@ async function tryHandleAddressTextCapture(from, userText) {
     } catch (e) {
       log("sbsr-addr-text", "auto-kickoff err: " + e.message);
       const fallback = getSbsrDeterministicMissingStateMessage(from, latestDraft);
-      try { await sendWhatsAppMessage(from, fallback); } catch (_) {}
+      try { await sendSbsrLocationPromptMessage(from, latestDraft, fallback); } catch (_) {}
       return true;
     }
   }
 
   if (isSbsrCheckoutCollectionActive(latestDraft)) {
     const missingMsg = getSbsrDeterministicMissingStateMessage(from, latestDraft);
-    try { await sendWhatsAppMessage(from, missingMsg); } catch (e) { log("sbsr-addr-text", "missing-piece send err: " + e.message); }
+    try { await sendSbsrLocationPromptMessage(from, latestDraft, missingMsg); } catch (e) { log("sbsr-addr-text", "missing-piece send err: " + e.message); }
     return true;
   }
 
