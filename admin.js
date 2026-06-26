@@ -345,17 +345,25 @@ const HTML = `<!doctype html>
   #modalActions button.cancel{background:#fff;color:#54656f;border:1px solid #d1d7db;padding:8px 18px;border-radius:6px;cursor:pointer;font-weight:500}
   #modalActions button.send{background:#25d366;color:#fff;border:0;padding:8px 22px;border-radius:6px;cursor:pointer;font-weight:600}
   #modalActions button.send:disabled{opacity:.5;cursor:not-allowed}
-  #composer .img-btn{width:38px;height:38px;border:0;border-radius:50%;background:#e8f5e9;color:#1b5e20;font-size:18px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:background .15s;margin-right:2px}
-  #composer .img-btn:hover{background:#c8e6c9}
+  #composer .attach-btn{width:38px;height:38px;border:0;border-radius:50%;background:#e8f5e9;color:#1b5e20;font-size:18px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:background .15s;margin-right:2px;position:relative}
+  #composer .attach-btn:hover{background:#c8e6c9}
+  .attach-popup{position:absolute;bottom:46px;left:0;background:#fff;border:1px solid #d1d7db;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.14);display:none;flex-direction:column;overflow:hidden;min-width:160px;z-index:50}
+  .attach-popup.open{display:flex}
+  .attach-popup button{background:none;border:0;padding:11px 16px;text-align:left;cursor:pointer;font-size:13px;color:#3b4a54;display:flex;align-items:center;gap:10px;transition:background .1s;width:100%}
+  .attach-popup button:hover{background:#f5f6f6}
   #imgPreview{width:100%;padding:6px 10px;background:#fff;display:none;flex-direction:column;align-items:flex-start;gap:6px;border-bottom:1px solid #e9edef}
 #imgPreview.active{display:flex}
-.img-preview-wrap{position:relative;display:flex;align-items:flex-start;gap:10px;width:100%}.img-preview-wrap image{max-height:160px;max-width:240px;border-radius:8px;object-fit:cover}
+.img-preview-wrap{position:relative;display:flex;align-items:flex-start;gap:10px;width:100%}
 .img-preview-wrap img{max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db;flex-shrink:0}
 .img-preview-wrap .img-info{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
 .img-preview-wrap .img-info .img-filename{font-size:12px;color:#3b4a54;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .img-preview-wrap .img-info .img-label{font-size:11px;color:#667781}
-
-  .img-cancel{width:18px;height:18px;border-radius:50%;border:0;background:#ef5350;color:#fff;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1}
+.doc-preview-wrap{display:flex;align-items:center;gap:10px;width:100%}
+.doc-icon{width:44px;height:44px;border-radius:8px;background:#e3f0ff;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0}
+.doc-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.doc-info .doc-filename{font-size:12px;color:#3b4a54;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc-info .doc-size{font-size:11px;color:#667781}
+  .img-cancel{width:24px;height:24px;border-radius:50%;border:0;background:#ef5350;color:#fff;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0}
   .img-cancel:hover{background:#d32f2f}
   .img-label{font-size:11px;color:#667781;white-space:nowrap}
 </style></head>
@@ -405,44 +413,88 @@ const HTML = `<!doctype html>
 <script>
 const H = { "x-admin-request": "1", "Authorization": "Basic __AUTH_HEADER__" };
 
-// --- Image upload state & handlers (added by Miko) ---
-var pendingImage = null; // { file: File, preview: string }
+// --- Attachment state & handlers (image + document) ---
+var pendingAttachment = null; // { file: File, preview?: string, type: 'image'|'document' }
+function toggleAttachPopup() {
+  var p = document.getElementById("attachPopup");
+  if (p) p.classList.toggle("open");
+}
+function closeAttachPopup() {
+  var p = document.getElementById("attachPopup");
+  if (p) p.classList.remove("open");
+}
+document.addEventListener("click", function() { closeAttachPopup(); });
 function triggerImageUpload() {
   var inp = document.getElementById("imgUpload");
   if (!inp) return;
-  inp.value = ""; // reset so same file can be re-selected
+  inp.value = "";
   inp.click();
+  closeAttachPopup();
+}
+function triggerDocumentUpload() {
+  var inp = document.getElementById("docUpload");
+  if (!inp) return;
+  inp.value = "";
+  inp.click();
+  closeAttachPopup();
 }
 function onImageSelected(e) {
   var f = e.target.files[0];
-  if (!f) { pendingImage = null; renderImagePreview(); return; }
-  if (!f.type.startsWith("image/")) { toast("Only image files allowed"); e.target.value = ""; return; }
-  if (f.size > 10 * 1024 * 1024) { toast("Max file size: 10 MB"); e.target.value = ""; return; }
-  pendingImage = { file: f, preview: null };
-  // Read preview via FileReader for reliable DataURL
+  if (!f) { pendingAttachment = null; renderAttachmentPreview(); return; }
+  if (!f.type.startsWith("image/") && !f.type.startsWith("video/")) { toast("Only image or video files allowed"); e.target.value = ""; return; }
+  if (f.size > 16 * 1024 * 1024) { toast("Max file size: 16 MB"); e.target.value = ""; return; }
+  pendingAttachment = { file: f, preview: null, type: "image" };
   var rdr = new FileReader();
-  rdr.onload = function(ev) { pendingImage.preview = ev.target.result; renderImagePreview(); };
-  rdr.onerror = function() { pendingImage.preview = null; toast("Failed to read image"); };
+  rdr.onload = function(ev) { pendingAttachment.preview = ev.target.result; renderAttachmentPreview(); };
+  rdr.onerror = function() { pendingAttachment.preview = null; toast("Failed to read file"); };
   rdr.readAsDataURL(f);
 }
-function cancelImage() {
-  if (pendingImage && pendingImage.preview) URL.revokeObjectURL(pendingImage.preview);
-  pendingImage = null;
-  renderImagePreview();
+function onDocumentSelected(e) {
+  var f = e.target.files[0];
+  if (!f) { pendingAttachment = null; renderAttachmentPreview(); return; }
+  if (f.size > 100 * 1024 * 1024) { toast("Max file size: 100 MB"); e.target.value = ""; return; }
+  pendingAttachment = { file: f, type: "document" };
+  renderAttachmentPreview();
 }
-function renderImagePreview() {
+function cancelAttachment() {
+  pendingAttachment = null;
+  renderAttachmentPreview();
+}
+function docEmoji(name) {
+  var ext = (name || "").split(".").pop().toLowerCase();
+  if (ext === "pdf") return "\\uD83D\\uDCC4";
+  if (ext === "doc" || ext === "docx") return "\\uD83D\\uDCC3";
+  if (ext === "xls" || ext === "xlsx") return "\\uD83D\\uDCCA";
+  if (ext === "ppt" || ext === "pptx") return "\\uD83D\\uDCCB";
+  if (ext === "zip" || ext === "rar" || ext === "7z") return "\\uD83D\\uDDC2";
+  return "\\uD83D\\uDCCE";
+}
+function fmtFileSize(bytes) {
+  return bytes > 1048576 ? (Math.round(bytes / 10485.76) / 100 + " MB") : (Math.round(bytes / 10.24) / 100 + " KB");
+}
+function renderAttachmentPreview() {
   var el = document.getElementById("imgPreview");
   if (!el) return;
-  if (pendingImage && pendingImage.preview) {
-    el.style.display = "flex";
-    el.style.flexDirection = "column";
+  if (!pendingAttachment) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "flex";
+  el.style.flexDirection = "column";
+  if (pendingAttachment.type === "image" && pendingAttachment.preview) {
     el.innerHTML = '<div class="img-preview-wrap">'
-      + '<img src="' + pendingImage.preview + '" style="max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db">'
+      + '<img src="' + pendingAttachment.preview + '" style="max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db">'
       + '<div class="img-info">'
-        + '<span class="img-filename">' + (pendingImage.file.name || "Image") + '</span>'
-        + '<span class="img-label">' + (pendingImage.file.size > 1048576 ? (Math.round(pendingImage.file.size/10485.76)/100 + " MB") : (Math.round(pendingImage.file.size/10.24)/100 + " KB")) + '</span>'
-        + '<button class="img-cancel" onclick="cancelImage()" title="Remove image">&times; Remove</button>'
+        + '<span class="img-filename">' + (pendingAttachment.file.name || "Image") + '</span>'
+        + '<span class="img-label">' + fmtFileSize(pendingAttachment.file.size) + '</span>'
+        + '<button class="img-cancel" onclick="cancelAttachment()" title="Remove">&times; Remove</button>'
       + '</div>'
+    + '</div>';
+  } else if (pendingAttachment.type === "document") {
+    el.innerHTML = '<div class="doc-preview-wrap">'
+      + '<div class="doc-icon">' + docEmoji(pendingAttachment.file.name) + '</div>'
+      + '<div class="doc-info">'
+        + '<span class="doc-filename">' + (pendingAttachment.file.name || "Document") + '</span>'
+        + '<span class="doc-size">' + fmtFileSize(pendingAttachment.file.size) + '</span>'
+      + '</div>'
+      + '<button class="img-cancel" onclick="cancelAttachment()" title="Remove">&times;</button>'
     + '</div>';
   } else {
     el.style.display = "none";
@@ -805,65 +857,74 @@ function renderThread(chat) {
 
   const comp = document.createElement("div"); comp.id = "composer";
 
-  // Hidden file input for images
+  // Hidden file inputs
   var imgInput = document.createElement("input");
-  imgInput.type = "file";
-  imgInput.id = "imgUpload";
-  imgInput.accept = "image/*";
-  imgInput.style.display = "none";
-  imgInput.onchange = onImageSelected;
+  imgInput.type = "file"; imgInput.id = "imgUpload"; imgInput.accept = "image/*,video/*";
+  imgInput.style.display = "none"; imgInput.onchange = onImageSelected;
   comp.appendChild(imgInput);
 
-  // Image attach button (before textarea)
-  var imgBtn = document.createElement("button");
-  imgBtn.className = "img-btn";
-  imgBtn.innerHTML = "📷";
-  imgBtn.title = "Attach image (max 10 MB)";
-  imgBtn.onclick = triggerImageUpload;
-  comp.appendChild(imgBtn);
-  const ta = document.createElement("textarea"); ta.placeholder = "Type a reply… (Shift+Enter for newline, Enter to send)"; ta.rows = 1;
-  ta.oninput = () => { ta.style.height = "42px"; ta.style.height = Math.min(ta.scrollHeight, 160) + "px"; };
-  // Image preview area — appears above the input row
-  var imgPrev = document.createElement("div");
-  imgPrev.id = "imgPreview";
+  var docInput = document.createElement("input");
+  docInput.type = "file"; docInput.id = "docUpload";
+  docInput.accept = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv";
+  docInput.style.display = "none"; docInput.onchange = onDocumentSelected;
+  comp.appendChild(docInput);
+
+  // Preview area — above the input row
+  var imgPrev = document.createElement("div"); imgPrev.id = "imgPreview";
   comp.appendChild(imgPrev);
-  // Input row (imgBtn + textarea + send)
-  var send = document.createElement("button"); send.className = "primary"; send.title = "Send"; send.textContent = "➤";
+
+  // Attach button (📎) with popup picker
+  var attachBtn = document.createElement("button");
+  attachBtn.className = "attach-btn"; attachBtn.title = "Lampirkan file";
+  attachBtn.innerHTML = "📎";
+  attachBtn.onclick = function(e) { e.stopPropagation(); toggleAttachPopup(); };
+
+  var attachPopup = document.createElement("div");
+  attachPopup.className = "attach-popup"; attachPopup.id = "attachPopup";
+  var popupImg = document.createElement("button");
+  popupImg.innerHTML = "📷 Foto / Video"; popupImg.onclick = function(e) { e.stopPropagation(); triggerImageUpload(); };
+  var popupDoc = document.createElement("button");
+  popupDoc.innerHTML = "📎 Dokumen"; popupDoc.onclick = function(e) { e.stopPropagation(); triggerDocumentUpload(); };
+  attachPopup.appendChild(popupImg); attachPopup.appendChild(popupDoc);
+  attachBtn.appendChild(attachPopup);
+
+  const ta = document.createElement("textarea"); ta.placeholder = "Type a reply\\u2026 (Shift+Enter for newline, Enter to send)"; ta.rows = 1;
+  ta.oninput = () => { ta.style.height = "42px"; ta.style.height = Math.min(ta.scrollHeight, 160) + "px"; };
+
+  // Input row (attachBtn + textarea + send)
+  var send = document.createElement("button"); send.className = "primary"; send.title = "Send"; send.textContent = "\\u27A4";
   const doSend = async () => {
     const text = ta.value.trim();
-    if (!text && !pendingImage) return;
+    if (!text && !pendingAttachment) return;
     send.disabled = true;
     try {
-      if (pendingImage) {
-        // Send image as base64 via JSON (more reliable than FormData/MP)
+      if (pendingAttachment) {
         var result = await new Promise(function(resolve, reject) {
           var reader = new FileReader();
-          reader.onload = function(e) { resolve(e.target.result); };
+          reader.onload = function(ev) { resolve(ev.target.result); };
           reader.onerror = function() { reject(new Error("Failed to read file")); };
-          reader.readAsDataURL(pendingImage.file);
+          reader.readAsDataURL(pendingAttachment.file);
         });
-        // result is "data:image/png;base64,iVBOR..."
         var parts = result.split(",");
         var base64data = parts[1];
         var mimeMatch = result.match(/^data:(\\S+);/);
-        var mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
-        var r = await fetch("/admin-send-image", {
+        var mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+        var isDoc = pendingAttachment.type === "document";
+        var endpoint = isDoc ? "/admin-send-document" : "/admin-send-image";
+        var bodyObj = isDoc
+          ? { phone: chat.phone, file_base64: base64data, mime_type: mimeType, filename: pendingAttachment.file.name, caption: text }
+          : { phone: chat.phone, image_base64: base64data, mime_type: mimeType, caption: text };
+        var r = await fetch(endpoint, {
           method:"POST",
           headers: Object.assign({"content-type":"application/json"}, H),
-          body: JSON.stringify({ phone: chat.phone, image_base64: base64data, mime_type: mimeType, caption: text })
+          body: JSON.stringify(bodyObj)
         });
         var ct = r.headers.get("content-type") || "";
-          if (!r.ok) {
-            if (ct.includes("json")) {
-              var err = await r.json();
-              throw new Error(err.error || r.statusText);
-            } else {
-              var txt = await r.text();
-              console.error("[admin] send-image failed", r.status, txt.substring(0,200));
-              throw new Error("HTTP " + r.status + ": " + txt.substring(0,60));
-            }
-          }
-        cancelImage();
+        if (!r.ok) {
+          if (ct.includes("json")) { var err = await r.json(); throw new Error(err.error || r.statusText); }
+          else { var txt = await r.text(); throw new Error("HTTP " + r.status + ": " + txt.substring(0,60)); }
+        }
+        cancelAttachment();
       } else {
         await api("/admin/api/send", { method:"POST",
           headers: Object.assign({"content-type":"application/json"}, H),
@@ -890,7 +951,7 @@ function renderThread(chat) {
   };
   var row = document.createElement("div");
   row.style.cssText = "display:flex;gap:8px;align-items:flex-end";
-  row.appendChild(imgBtn);
+  row.appendChild(attachBtn);
   row.appendChild(ta);
   row.appendChild(send);
   comp.appendChild(row);
@@ -1169,7 +1230,7 @@ async function handleReview(phone, action, btn) {
 // ---------- startup ----------
 loadChats();
 setInterval(async () => {
-  if (pendingImage) return;
+  if (pendingAttachment) return;
   // Track old msg count before refresh
   var prCnt = lastMsgCount[activePhone || ""] || 0;
   await loadChats();

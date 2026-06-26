@@ -10671,6 +10671,38 @@ app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) 
   }
 });
 
+// --- Admin: send document via WhatsApp (base64 JSON) ---
+app.post("/admin-send-document", express.json({ limit: "110mb" }), async (req, res) => {
+  log("admin-send-document", "REQUEST received");
+  try {
+    const { phone, file_base64, mime_type, filename: origFilename, caption } = req.body;
+    if (!phone) return res.status(400).json({ error: "missing phone" });
+    if (!file_base64) return res.status(400).json({ error: "missing file_base64" });
+    const buf = Buffer.from(file_base64, "base64");
+    const mime = mime_type || "application/octet-stream";
+
+    // Sanitize filename — keep only safe chars
+    const safeFilename = (origFilename || "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").slice(0, 120);
+    const storedFilename = "ADMIN-DOC-" + Date.now() + "-" + safeFilename;
+    const uploadDir = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads";
+    try { if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true }); } catch (_) {}
+    const filePath = uploadDir + "/" + storedFilename;
+    fs.writeFileSync(filePath, buf);
+    const fileUrl = "https://production.biks.ai/receipts/" + storedFilename;
+
+    // Upload to WhatsApp then send as document
+    var mediaId = await uploadMediaToWhatsApp(filePath, mime);
+    await sendWhatsAppDocument(phone, mediaId, safeFilename, caption || "");
+
+    var logText = "[doc: " + fileUrl + " (" + safeFilename + ")]" + (caption ? " " + caption : "");
+    safeLog(admin.logOutgoing, phone, logText);
+    res.json({ ok: true, url: fileUrl });
+  } catch (e) {
+    log("admin-send-document", "Error: " + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 try { admin.mount(app, sendWhatsAppMessage, process.env.ADMIN_PASSWORD); }
 catch (e) { log("admin", "mount failed (non-fatal): " + e.message); }
 
