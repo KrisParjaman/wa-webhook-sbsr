@@ -1,54 +1,104 @@
 # wa-bridge-sbsr
 
-> The WhatsApp Cloud API → OpenClaw gateway for Sentuh Rasa. Lives at `/docker/wa-webhook-sbsr/` on the VPS once Stage 2 deploys.
+> WhatsApp Cloud API bridge untuk **Sentuh Rasa** (SBSR).  
+> Berjalan di droplet `biks-droplet` (206.189.34.228) — `/docker/wa-webhook-sbsr/`  
+> Reverse proxy: **Caddy** → `https://production.biks.ai/admin`
 
-## Status
+## Status Proyek — **ACTIVE / PRODUCTION** ✅
 
-Production source is **derived from `/docker/wa-webhook-beeru/`** at deploy time, not committed here. Reasons:
-- Beeru's `server.js` is ~52 KB of mature code (admin panel, chat history, contact mgmt, retry/queue) that we want to inherit, not re-write
-- Bridge code drifts heavily across the lifecycle of a client; a clean re-baseline is cheaper than a fork
-- The repo's job is configuration + workspace; bridge runtime is operational
+Bridge ini udah berjalan di production. Bukan lagi turunan Beeru — banyak patch & fitur tambahan sendiri.
 
-## Stage 2 deployment (from `docs/05-deployment-plan.md`)
+---
 
-```bash
-ssh root@VPS
+## Fitur Admin Panel (`/admin`)
 
-# 1. Clone Beeru's bridge as the starting point
-cp -r /docker/wa-webhook-beeru /docker/wa-webhook-sbsr
-cd /docker/wa-webhook-sbsr
+| Fitur | Status |
+|---|---|
+| **Chat history** — lihat riwayat percakapan per nomor | ✅ |
+| **Kirim teks** — balas chat dari panel admin | ✅ |
+| **Kirim gambar** — upload & kirim gambar ke WhatsApp | ✅ |
+| **Preview gambar** — thumbnail preview di chat thread (incoming & outgoing) | ✅ |
+| **Image composer** — pilih gambar 📷 → preview muncul di atas textarea → ketik caption → kirim | ✅ |
+| **Smart scroll** — scroll-to-bottom cuma kalo user di bottom; kalo lagi liat history, ga ke-scroll paksa | ✅ |
+| **Real-time refresh** — chat otomatis refresh tiap 5 detik, tapi skip kalo user lagi ngetik/nge-select gambar | ✅ |
+| **CSRF protection** — header `x-admin-request` | ✅ |
+| **Basic auth** — username/password | ✅ |
 
-# 2. Replace .env with sb-sentuh-rasa values
-cp /tmp/sbsr-bridge.env .env   # copy the file from this folder, see env.template below
+## Endpoint API
 
-# 3. Patch port + OpenClaw target in server.js if hardcoded
-#    (Beeru's bridge reads from .env, so usually nothing to patch)
+| Method | Path | Fungsi |
+|---|---|---|
+| `GET` | `/admin` | Panel admin UI |
+| `GET` | `/admin/api/chats` | List semua chat |
+| `GET` | `/admin/api/chat/:phone` | Detail chat per nomor (JSON) |
+| `POST` | `/admin/api/send` | Kirim pesan teks |
+| `POST` | `/admin-send-image` | Kirim gambar (base64 JSON body) |
+| `GET` | `/admin/api/stats` | Statistik |
+| `POST` | `/admin/api/pause` | Pause/resume bot |
+| `POST` | `/admin/api/mark-read` | Tandai chat sudah dibaca |
 
-# 4. Start under pm2
-pm2 start server.js --name wa-bridge-sbsr
-pm2 save
+---
+
+## Struktur Folder
+
+```
+/docker/wa-webhook-sbsr/
+├── admin.js            # Frontend admin panel (HTML + CSS + JS inline)
+├── server.js           # Backend (Express, WhatsApp API, routing)
+├── .env                # Environment variables (WA creds, dll)
+├── .gitignore
+├── package.json
+├── chats/              # Data chat per nomor (JSON files)
+├── receipts/           # Gambar receipt customer (dari webhook)
+├── assets/             # Static assets
+├── lib/                # Library files
+├── scripts/            # Utility scripts
+├── tools/
+└── node_modules/
 ```
 
-## Env (copy to `/docker/wa-webhook-sbsr/.env`)
+### Path Gambar
 
-See `env.template` in this directory.
+- **Customer receipts** → `receipts/` (di-serve Caddy via `https://production.biks.ai/receipts/`)
+- **Admin outgoing images** → disimpan di `/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads/` dengan prefix `ADMIN-IMG-`
+- Format log di chat: `[image: URL_public] caption`
 
-## What needs to differ from Beeru's bridge
+---
 
-| Concern | Beeru | SBSR |
-|---|---|---|
-| Port | 3001 | **3002** |
-| OpenClaw target | 127.0.0.1:52208 | **127.0.0.1:45920** |
-| Phone IDs | one (Beeru) | **three** (CS / Finance / Kitchen — bridge differentiates by `phone_number_id`) |
-| Admin URL | none | **https://sbsr.biks.ai/admin** (Stage 3+) |
-| Receipt path mount | `airoklin-pdf/uploads` | **`sentuhrasa-pdf/uploads`** |
+## Deployment
 
-## Stage 2 patch checklist (after copying Beeru's bridge)
+```bash
+# Path server
+/docker/wa-webhook-sbsr/
 
-- [ ] Update routing logic: when inbound `phone_number_id` matches `WA_PHONE_NUMBER_ID_FINANCE`, treat as Finance approve/reject UI events
-- [ ] Same for Kitchen phone (one-way; suppress auto-reply)
-- [ ] Wire Biteship webhook handler at `/biteship/status` (forwards to `sentuh-tracking-followup.mjs --webhook`)
-- [ ] Add operating-hours gate: outside `SBSR_HOURS_OPEN`–`SBSR_HOURS_CLOSE`, send `sr_off_hours_ack` template instead of forwarding to OpenClaw
-- [ ] Verify chat-storage path is `chats-sbsr/` (not `chats/`) so it doesn't collide if the bridge ever mounts the wrong volume
+# PM2 process
+pm2 start server.js --name wa-bridge-sbsr
 
-These are tracked in `docs/05-deployment-plan.md` § Stage 2 deployment.
+# Reverse proxy (Caddy)
+production.biks.ai {
+    handle /admin* {
+        reverse_proxy 127.0.0.1:3001
+    }
+    handle /receipts/* {
+        root * /docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads
+        file_server
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3001
+    }
+}
+```
+
+## Catatan Penting
+
+1. **port:** 3001 (Caddy → proxy ke localhost:3001)
+2. **admin.js** — semua kode frontend di-embed dalam template literal `const HTML = \`...\`;` di Node.js. Hati-hati pake backslash (double-escape untuk regex!)
+3. **Double-escape:** Di dalam template literal, `\s` harus ditulis `\\s`, `\.` → `\\.`, `\/` → `\\/`
+4. **Image sending** pake base64 JSON (bukan multipart form-data) biar lebih reliable
+5. **File upload limit:** 15mb (server-side JSON body parser)
+
+## Dev Notes
+
+- Origin: turunan dari Beeru (`/docker/wa-webhook-beeru/`), tapi sekarang banyak perbedaan
+- Repository GitHub: https://github.com/KrisParjaman/wa-webhook-sbsr
+- Terakhir update: **26 Juni 2026** — image preview, smart scroll, send image, fix double-escape
