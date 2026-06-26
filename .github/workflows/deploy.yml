@@ -18,11 +18,13 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H 206.189.34.228 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -t ed25519 206.189.34.228 >> ~/.ssh/known_hosts 2>/dev/null
+          # Fallback to RSA
+          ssh-keyscan -t rsa 206.189.34.228 >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Deploy via SSH
         run: |
-          ssh root@206.189.34.228 << 'EOF'
+          ssh -o StrictHostKeyChecking=accept-new root@206.189.34.228 << 'EOF'
             set -e
             echo "🚀 Deploying wa-bridge-sbsr..."
 
@@ -41,8 +43,8 @@ jobs:
 
             # Validate syntax
             echo "🔍 Checking syntax..."
-            node --check server.js || echo "⚠️ server.js syntax check skipped"
-            node --check admin.js || echo "⚠️ admin.js syntax check skipped"
+            node --check server.js
+            node --check admin.js
 
             # Restart PM2
             echo "🔄 Restarting PM2 process..."
@@ -53,7 +55,7 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 3
-          curl -s https://production.biks.ai/admin/api/stats | head -5
+          sleep 5
+          curl -sf https://production.biks.ai/admin/api/stats | head -3
           echo ""
           echo "✅ Health check passed"
