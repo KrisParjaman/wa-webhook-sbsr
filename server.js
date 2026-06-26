@@ -94,7 +94,7 @@ const CHAT_TIMEOUT_MS = 240000;
 
 const RECEIPT_BASE_URL = "https://production.biks.ai/receipts/";
 const IMGBB_KEY = "7f6defdcbb8475ac203f45c966b36a78";
-const UPLOAD_DIR = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads";
+const UPLOAD_DIR = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads";
 
 // --- Catalog product ID mapping (Meta API live + JSON fallback) ---
 const CATALOG_API_TOKEN = process.env.CATALOG_API_TOKEN || "";
@@ -1643,7 +1643,7 @@ async function maybeSendQrisMarkerMedia(to, text, totalRaw) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   try {
-    const qrisHostPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/assets/qris-static.png";
+    const qrisHostPath = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/assets/qris-static.png";
     if (!fs.existsSync(qrisHostPath)) {
       log("qris-media", "qris file missing: " + qrisHostPath);
       return { text: stripped, sent: false };
@@ -8894,7 +8894,7 @@ async function tryHandleInvoiceOk(from, userText) {
         log("sbsr-payment-intercept", "skip_duplicate_qris");
       } else {
         try {
-          const qrisHostPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/assets/qris-static.png";
+          const qrisHostPath = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/assets/qris-static.png";
           if (fs.existsSync(qrisHostPath)) {
             log("qris-media", "start send");
             const mediaId = await uploadMediaToWhatsApp(qrisHostPath, "image/png");
@@ -10567,7 +10567,7 @@ function resolveApiToken(req) {
 function loadCompatOpenClawTokens() {
   const tokens = new Set([String(OPENCLAW_TOKEN || "").trim()].filter(Boolean));
   try {
-    const envPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/scripts/.env";
+    const envPath = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/scripts/.env";
     if (fs.existsSync(envPath)) {
       const txt = fs.readFileSync(envPath, "utf8");
       const m = txt.match(/^\s*OPENCLAW_TOKEN\s*=\s*(.+)\s*$/m);
@@ -10871,8 +10871,8 @@ app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) 
 
     const prefix = isVideo ? "ADMIN-VID" : "ADMIN-IMG";
     const filename = prefix + "-" + Date.now() + ext;
-    var receiptPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads/" + filename;
-    try { if (!fs.existsSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads")) fs.mkdirSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads", { recursive: true }); } catch(_) {}
+    var receiptPath = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads/" + filename;
+    try { if (!fs.existsSync("/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads")) fs.mkdirSync("/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads", { recursive: true }); } catch(_) {}
     fs.writeFileSync(receiptPath, buf);
     var mediaUrl = "https://production.biks.ai/receipts/" + filename;
 
@@ -10930,7 +10930,7 @@ app.post("/admin-send-document", express.json({ limit: "110mb" }), async (req, r
     const mime = WA_DOC_MIME[ext] || "application/octet-stream";
 
     const storedFilename = "ADMIN-DOC-" + Date.now() + "-" + safeFilename;
-    const uploadDir = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads";
+    const uploadDir = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads";
     try { if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true }); } catch (_) {}
     const filePath = uploadDir + "/" + storedFilename;
     fs.writeFileSync(filePath, buf);
