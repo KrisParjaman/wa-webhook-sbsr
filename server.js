@@ -1586,6 +1586,28 @@ async function uploadMediaToWhatsApp(filePath, mimeType) {
 
 // --- WhatsApp Cloud API: send document by media ID ---
 
+async function sendWhatsAppVideo(to, mediaId, caption) {
+  const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
+  const payload = {
+    messaging_product: "whatsapp", recipient_type: "individual", to: to, type: "video",
+    video: { id: mediaId, caption: caption || "" },
+  };
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => {
+      let data = ""; res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) { log("wa-video", "Video sent to " + to); resolve(JSON.parse(data)); }
+        else { log("wa-video", "Error " + res.statusCode + ": " + data); reject(new Error("WA video error " + res.statusCode)); }
+      });
+    });
+    req.on("error", reject); req.write(body); req.end();
+  });
+}
+
 async function sendWhatsAppImage(to, mediaId, caption) {
   const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
   const payload = {
@@ -10825,7 +10847,7 @@ app.post("/biteship-webhook", async (req, res) => {
 
 // --- Admin inbox panel (mount before listen) ---
 
-// --- Admin: send image via WhatsApp (base64 JSON) — with preview URL ---
+// --- Admin: send image/video via WhatsApp (base64 JSON) — with preview URL ---
 app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) => {
   log("admin-send-image", "REQUEST received, headers: " + Object.keys(req.headers).join(","));
   try {
@@ -10834,23 +10856,37 @@ app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) 
     if (!image_base64) return res.status(400).json({ error: "missing image_base64" });
     const buf = Buffer.from(image_base64, "base64");
     const mime = mime_type || "image/jpeg";
+    const isVideo = mime.startsWith("video/");
 
-    // Save to receipts dir so it has a public URL (same as customer images)
-    const ext = mime.includes("png") ? ".png" : mime.includes("gif") ? ".gif" : ".jpg";
-    const filename = "ADMIN-IMG-" + Date.now() + ext;
+    // Determine correct file extension from MIME type
+    let ext;
+    if      (mime.includes("mp4"))       ext = ".mp4";
+    else if (mime.includes("webm"))      ext = ".webm";
+    else if (mime.includes("quicktime")) ext = ".mov";
+    else if (mime.includes("3gpp"))      ext = ".3gpp";
+    else if (mime.includes("png"))       ext = ".png";
+    else if (mime.includes("gif"))       ext = ".gif";
+    else if (mime.includes("webp"))      ext = ".webp";
+    else                                 ext = ".jpg";
+
+    const prefix = isVideo ? "ADMIN-VID" : "ADMIN-IMG";
+    const filename = prefix + "-" + Date.now() + ext;
     var receiptPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads/" + filename;
     try { if (!fs.existsSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads")) fs.mkdirSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads", { recursive: true }); } catch(_) {}
     fs.writeFileSync(receiptPath, buf);
-    var imageUrl = "https://production.biks.ai/receipts/" + filename;
+    var mediaUrl = "https://production.biks.ai/receipts/" + filename;
 
-    // Upload to WhatsApp
     var mediaId = await uploadMediaToWhatsApp(receiptPath, mime);
-    await sendWhatsAppImage(phone, mediaId, caption || "");
+    if (isVideo) {
+      await sendWhatsAppVideo(phone, mediaId, caption || "");
+    } else {
+      await sendWhatsAppImage(phone, mediaId, caption || "");
+    }
 
-    // Log with URL so admin.js can render preview
-    var logText = "[image: " + imageUrl + "]" + (caption ? " " + caption : "");
+    // Log with marker so admin.js can render the correct element (image vs video)
+    var logText = (isVideo ? "[video: " : "[image: ") + mediaUrl + "]" + (caption ? " " + caption : "");
     safeLog(admin.logOutgoing, phone, logText);
-    res.json({ ok: true, url: imageUrl });
+    res.json({ ok: true, url: mediaUrl });
   } catch(e) {
     log("admin-send-image", "Error: " + e.message);
     res.status(500).json({ error: e.message });

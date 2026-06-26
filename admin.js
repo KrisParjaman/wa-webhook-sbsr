@@ -812,40 +812,47 @@ function renderThread(chat) {
     const d = document.createElement("div");
     const sameAuthor = m.dir === lastDir;
     d.className = "msg " + m.dir + (sameAuthor ? " same-author" : "");
-    // Check if message contains an image URL (Receipt/Image or [image] marker from admin)
-    var imgMatch = m.text.match(/(Receipt\\/Image|image:|https?:\\/\\/[^\\s]+\\.(?:jpg|jpeg|png|gif|webp))/i);
-    if (imgMatch) {
-      var imgUrl = m.text.match(/https?:\\/\\/[^\\s]+(?:jpg|jpeg|png|gif|webp)/i) || m.text.match(/\\[image:\\s*(https?:\\/\\/[^\\s]+)\\s*\\]/i);
-      if (imgUrl) {
-        var wrap = document.createElement("div"); wrap.style.display = "flex"; wrap.style.flexDirection = "column"; wrap.style.gap = "4px";
-        // Image thumbnail
+    // Check if message contains an image or video URL / marker
+    var _mediaMarker = m.text.match(/\\[(image|video):\\s*(https?:\\/\\/[^\\s\\]]+)\\s*\\]/i);
+    var _rawImg = m.text.match(/https?:\\/\\/[^\\s]+\\.(?:jpg|jpeg|png|gif|webp)/i);
+    var _rawVid = m.text.match(/https?:\\/\\/[^\\s]+\\.(?:mp4|webm|mov|3gpp)/i);
+    var _mediaUrl = _mediaMarker ? _mediaMarker[2] : (_rawImg ? _rawImg[0] : (_rawVid ? _rawVid[0] : null));
+    var _isVid    = _mediaMarker ? _mediaMarker[1].toLowerCase() === "video" : !!_rawVid;
+    var _isImg    = !_isVid && (_mediaMarker || _rawImg);
+    if (!_mediaUrl && m.text.match(/Receipt\\/Image/i)) { _mediaUrl = m.text; _isImg = true; }
+
+    if (_mediaUrl && (_isImg || _isVid)) {
+      var wrap = document.createElement("div"); wrap.style.display = "flex"; wrap.style.flexDirection = "column"; wrap.style.gap = "4px";
+      if (_isVid) {
+        // Video player inline
+        var vidEl = document.createElement("video");
+        vidEl.src = _mediaUrl; vidEl.controls = true;
+        vidEl.style.maxWidth = "260px"; vidEl.style.maxHeight = "200px";
+        vidEl.style.borderRadius = "8px"; vidEl.style.display = "block";
+        vidEl.style.background = "#000";
+        wrap.appendChild(vidEl);
+      } else {
+        // Image thumbnail — click to open full size
         var imgEl = document.createElement("img");
-        imgEl.src = imgUrl[0];
+        imgEl.src = _mediaUrl; imgEl.loading = "lazy";
         imgEl.style.maxWidth = "260px"; imgEl.style.maxHeight = "200px";
         imgEl.style.borderRadius = "8px"; imgEl.style.cursor = "pointer";
         imgEl.style.objectFit = "cover"; imgEl.style.border = "1px solid rgba(0,0,0,.08)";
-        imgEl.loading = "lazy";
         imgEl.title = "Click to view full size";
-        // Click to open in new tab
-        imgEl.onclick = function() { window.open(imgUrl[0], "_blank"); };
+        imgEl.onclick = (function(u){ return function(){ window.open(u,"_blank"); }; })(_mediaUrl);
         wrap.appendChild(imgEl);
-        // Caption text (clean up the URL from text)
-        var cleanText = m.text;
-        // Remove [Receipt/Image: ...] markers
-        cleanText = cleanText.replace(/\\[Receipt\\/Image:[^\\]]*\\]/, "");
-        // Remove [image: URL] markers
-        cleanText = cleanText.replace(/\\[image:\\s*https?:\\/\\/[^\\s]+\\s*\\]/i, "");
-        // Remove raw image URLs
-        cleanText = cleanText.replace(/https?:\\/\\/[^\\s]+\\.[a-z]+/ig, "");
-        cleanText = cleanText.trim();
-        if (cleanText) {
-          var cap = document.createElement("div"); cap.style.fontSize = "13px"; cap.textContent = cleanText;
-          wrap.appendChild(cap);
-        }
-        d.appendChild(wrap);
-      } else {
-        d.textContent = m.text;
       }
+      // Caption: strip all media markers and raw URLs
+      var cleanText = m.text
+        .replace(/\\[Receipt\\/Image:[^\\]]*\\]/g, "")
+        .replace(/\\[(image|video):\\s*https?:\\/\\/[^\\s\\]]+\\s*\\]/gi, "")
+        .replace(/https?:\\/\\/[^\\s]+/g, "")
+        .trim();
+      if (cleanText) {
+        var cap = document.createElement("div"); cap.style.fontSize = "13px"; cap.textContent = cleanText;
+        wrap.appendChild(cap);
+      }
+      d.appendChild(wrap);
     } else {
       d.textContent = m.text;
     }
