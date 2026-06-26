@@ -22,3 +22,7 @@ cat
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup files
+*.bak*
+*.bak

@@ -246,7 +246,7 @@ const HTML = `<!doctype html>
   .msg .ts{display:inline-block;font-size:11px;color:#667781;margin-left:8px;float:right;margin-top:4px;font-weight:400}
   .msg.out .ts{color:#54656f}
   .msg.out .ts::after{content:" \\2713\\2713";color:#53bdeb;font-weight:600}
-  #composer{padding:10px 16px;border-top:1px solid #d1d7db;background:#f0f2f5;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+  #composer{padding:10px 16px;border-top:1px solid #d1d7db;background:#f0f2f5;display:flex;flex-direction:column;gap:4px;flex-shrink:0}
   #composer textarea{flex:1;padding:9px 14px;font:inherit;border:0;border-radius:8px;resize:none;height:42px;max-height:160px;background:#fff;outline:none;color:#3b4a54}
   button.primary{padding:0;border:0;width:42px;height:42px;border-radius:50%;background:#25d366;color:#fff;font-weight:600;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
   button.primary:hover{background:#1da851}
@@ -273,8 +273,8 @@ const HTML = `<!doctype html>
     body.in-chat #main{display:flex}
     .back-btn{display:flex !important;align-items:center;justify-content:center}
     /* Touch-friendly hit targets (Apple HIG min 44pt, Material 48dp) */
-    #composer{padding:8px 10px;gap:6px}
-    #composer textarea{font-size:16px !important;min-height:44px;padding:10px 14px}  /* 16px font prevents iOS auto-zoom on focus */
+    #composer{padding:8px 10px;gap:4px}
+    #composer textarea{font-size:16px !important;min-height:44px;padding:10px 14px;width:100%;box-sizing:border-box}  /* 16px font prevents iOS auto-zoom on focus */
     button.primary{width:44px;height:44px;font-size:20px}
     /* Wider message bubbles on small screens */
     .msg{max-width:85%}
@@ -345,6 +345,19 @@ const HTML = `<!doctype html>
   #modalActions button.cancel{background:#fff;color:#54656f;border:1px solid #d1d7db;padding:8px 18px;border-radius:6px;cursor:pointer;font-weight:500}
   #modalActions button.send{background:#25d366;color:#fff;border:0;padding:8px 22px;border-radius:6px;cursor:pointer;font-weight:600}
   #modalActions button.send:disabled{opacity:.5;cursor:not-allowed}
+  #composer .img-btn{width:38px;height:38px;border:0;border-radius:50%;background:#e8f5e9;color:#1b5e20;font-size:18px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:background .15s;margin-right:2px}
+  #composer .img-btn:hover{background:#c8e6c9}
+  #imgPreview{width:100%;padding:6px 10px;background:#fff;display:none;flex-direction:column;align-items:flex-start;gap:6px;border-bottom:1px solid #e9edef}
+#imgPreview.active{display:flex}
+.img-preview-wrap{position:relative;display:flex;align-items:flex-start;gap:10px;width:100%}.img-preview-wrap image{max-height:160px;max-width:240px;border-radius:8px;object-fit:cover}
+.img-preview-wrap img{max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db;flex-shrink:0}
+.img-preview-wrap .img-info{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.img-preview-wrap .img-info .img-filename{font-size:12px;color:#3b4a54;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.img-preview-wrap .img-info .img-label{font-size:11px;color:#667781}
+
+  .img-cancel{width:18px;height:18px;border-radius:50%;border:0;background:#ef5350;color:#fff;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1}
+  .img-cancel:hover{background:#d32f2f}
+  .img-label{font-size:11px;color:#667781;white-space:nowrap}
 </style></head>
 <body><div id="app">
   <div id="sidebar">
@@ -391,6 +404,51 @@ const HTML = `<!doctype html>
 </div>
 <script>
 const H = { "x-admin-request": "1", "Authorization": "Basic __AUTH_HEADER__" };
+
+// --- Image upload state & handlers (added by Miko) ---
+var pendingImage = null; // { file: File, preview: string }
+function triggerImageUpload() {
+  var inp = document.getElementById("imgUpload");
+  if (!inp) return;
+  inp.value = ""; // reset so same file can be re-selected
+  inp.click();
+}
+function onImageSelected(e) {
+  var f = e.target.files[0];
+  if (!f) { pendingImage = null; renderImagePreview(); return; }
+  if (!f.type.startsWith("image/")) { toast("Only image files allowed"); e.target.value = ""; return; }
+  if (f.size > 10 * 1024 * 1024) { toast("Max file size: 10 MB"); e.target.value = ""; return; }
+  pendingImage = { file: f, preview: null };
+  // Read preview via FileReader for reliable DataURL
+  var rdr = new FileReader();
+  rdr.onload = function(ev) { pendingImage.preview = ev.target.result; renderImagePreview(); };
+  rdr.onerror = function() { pendingImage.preview = null; toast("Failed to read image"); };
+  rdr.readAsDataURL(f);
+}
+function cancelImage() {
+  if (pendingImage && pendingImage.preview) URL.revokeObjectURL(pendingImage.preview);
+  pendingImage = null;
+  renderImagePreview();
+}
+function renderImagePreview() {
+  var el = document.getElementById("imgPreview");
+  if (!el) return;
+  if (pendingImage && pendingImage.preview) {
+    el.style.display = "flex";
+    el.style.flexDirection = "column";
+    el.innerHTML = '<div class="img-preview-wrap">'
+      + '<img src="' + pendingImage.preview + '" style="max-height:160px;max-width:240px;border-radius:8px;object-fit:cover;border:1px solid #d1d7db">'
+      + '<div class="img-info">'
+        + '<span class="img-filename">' + (pendingImage.file.name || "Image") + '</span>'
+        + '<span class="img-label">' + (pendingImage.file.size > 1048576 ? (Math.round(pendingImage.file.size/10485.76)/100 + " MB") : (Math.round(pendingImage.file.size/10.24)/100 + " KB")) + '</span>'
+        + '<button class="img-cancel" onclick="cancelImage()" title="Remove image">&times; Remove</button>'
+      + '</div>'
+    + '</div>';
+  } else {
+    el.style.display = "none";
+    el.innerHTML = "";
+  }
+}
 let activePhone = null;
 let chats = [];
 let allChats = []; // unfiltered cache
@@ -398,6 +456,8 @@ let lastSeenInTs = Number(localStorage.getItem("lastSeenInTs") || 0);
 let audioCtx = null;
 let searchQuery = "";
 let activeFilter = localStorage.getItem("activeFilter") || "all";
+let scrollState = {}; // { phone: { wasAtBottom, scrollTop } }
+let lastMsgCount = {}; // track msg count per phone
 
 document.addEventListener("click", () => {
   if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
@@ -699,7 +759,43 @@ function renderThread(chat) {
     const d = document.createElement("div");
     const sameAuthor = m.dir === lastDir;
     d.className = "msg " + m.dir + (sameAuthor ? " same-author" : "");
-    d.textContent = m.text; // textContent prevents XSS
+    // Check if message contains an image URL (Receipt/Image or [image] marker from admin)
+    var imgMatch = m.text.match(/(Receipt\\/Image|image:|https?:\\/\\/[^\\s]+\\.(?:jpg|jpeg|png|gif|webp))/i);
+    if (imgMatch) {
+      var imgUrl = m.text.match(/https?:\\/\\/[^\\s]+(?:jpg|jpeg|png|gif|webp)/i) || m.text.match(/\\[image:\\s*(https?:\\/\\/[^\\s]+)\\s*\\]/i);
+      if (imgUrl) {
+        var wrap = document.createElement("div"); wrap.style.display = "flex"; wrap.style.flexDirection = "column"; wrap.style.gap = "4px";
+        // Image thumbnail
+        var imgEl = document.createElement("img");
+        imgEl.src = imgUrl[0];
+        imgEl.style.maxWidth = "260px"; imgEl.style.maxHeight = "200px";
+        imgEl.style.borderRadius = "8px"; imgEl.style.cursor = "pointer";
+        imgEl.style.objectFit = "cover"; imgEl.style.border = "1px solid rgba(0,0,0,.08)";
+        imgEl.loading = "lazy";
+        imgEl.title = "Click to view full size";
+        // Click to open in new tab
+        imgEl.onclick = function() { window.open(imgUrl[0], "_blank"); };
+        wrap.appendChild(imgEl);
+        // Caption text (clean up the URL from text)
+        var cleanText = m.text;
+        // Remove [Receipt/Image: ...] markers
+        cleanText = cleanText.replace(/\\[Receipt\\/Image:[^\\]]*\\]/, "");
+        // Remove [image: URL] markers
+        cleanText = cleanText.replace(/\\[image:\\s*https?:\\/\\/[^\\s]+\\s*\\]/i, "");
+        // Remove raw image URLs
+        cleanText = cleanText.replace(/https?:\\/\\/[^\\s]+\\.[a-z]+/ig, "");
+        cleanText = cleanText.trim();
+        if (cleanText) {
+          var cap = document.createElement("div"); cap.style.fontSize = "13px"; cap.textContent = cleanText;
+          wrap.appendChild(cap);
+        }
+        d.appendChild(wrap);
+      } else {
+        d.textContent = m.text;
+      }
+    } else {
+      d.textContent = m.text;
+    }
     const ts = document.createElement("span"); ts.className = "ts"; ts.textContent = fmtTime(m.ts);
     d.appendChild(ts);
     thread.appendChild(d);
@@ -708,16 +804,71 @@ function renderThread(chat) {
   main.appendChild(thread);
 
   const comp = document.createElement("div"); comp.id = "composer";
+
+  // Hidden file input for images
+  var imgInput = document.createElement("input");
+  imgInput.type = "file";
+  imgInput.id = "imgUpload";
+  imgInput.accept = "image/*";
+  imgInput.style.display = "none";
+  imgInput.onchange = onImageSelected;
+  comp.appendChild(imgInput);
+
+  // Image attach button (before textarea)
+  var imgBtn = document.createElement("button");
+  imgBtn.className = "img-btn";
+  imgBtn.innerHTML = "📷";
+  imgBtn.title = "Attach image (max 10 MB)";
+  imgBtn.onclick = triggerImageUpload;
+  comp.appendChild(imgBtn);
   const ta = document.createElement("textarea"); ta.placeholder = "Type a reply… (Shift+Enter for newline, Enter to send)"; ta.rows = 1;
   ta.oninput = () => { ta.style.height = "42px"; ta.style.height = Math.min(ta.scrollHeight, 160) + "px"; };
-  const send = document.createElement("button"); send.className = "primary"; send.title = "Send"; send.textContent = "➤";
+  // Image preview area — appears above the input row
+  var imgPrev = document.createElement("div");
+  imgPrev.id = "imgPreview";
+  comp.appendChild(imgPrev);
+  // Input row (imgBtn + textarea + send)
+  var send = document.createElement("button"); send.className = "primary"; send.title = "Send"; send.textContent = "➤";
   const doSend = async () => {
-    const text = ta.value.trim(); if (!text) return;
+    const text = ta.value.trim();
+    if (!text && !pendingImage) return;
     send.disabled = true;
     try {
-      await api("/admin/api/send", { method:"POST",
-        headers: Object.assign({"content-type":"application/json"}, H),
-        body: JSON.stringify({ phone: chat.phone, text }) });
+      if (pendingImage) {
+        // Send image as base64 via JSON (more reliable than FormData/MP)
+        var result = await new Promise(function(resolve, reject) {
+          var reader = new FileReader();
+          reader.onload = function(e) { resolve(e.target.result); };
+          reader.onerror = function() { reject(new Error("Failed to read file")); };
+          reader.readAsDataURL(pendingImage.file);
+        });
+        // result is "data:image/png;base64,iVBOR..."
+        var parts = result.split(",");
+        var base64data = parts[1];
+        var mimeMatch = result.match(/^data:(\\S+);/);
+        var mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+        var r = await fetch("/admin-send-image", {
+          method:"POST",
+          headers: Object.assign({"content-type":"application/json"}, H),
+          body: JSON.stringify({ phone: chat.phone, image_base64: base64data, mime_type: mimeType, caption: text })
+        });
+        var ct = r.headers.get("content-type") || "";
+          if (!r.ok) {
+            if (ct.includes("json")) {
+              var err = await r.json();
+              throw new Error(err.error || r.statusText);
+            } else {
+              var txt = await r.text();
+              console.error("[admin] send-image failed", r.status, txt.substring(0,200));
+              throw new Error("HTTP " + r.status + ": " + txt.substring(0,60));
+            }
+          }
+        cancelImage();
+      } else {
+        await api("/admin/api/send", { method:"POST",
+          headers: Object.assign({"content-type":"application/json"}, H),
+          body: JSON.stringify({ phone: chat.phone, text }) });
+      }
       ta.value = ""; ta.style.height = "42px"; await openChat(chat.phone); loadChats();
     } catch (e) { toast("send err: "+e.message) }
     finally { send.disabled = false }
@@ -737,9 +888,28 @@ function renderThread(chat) {
       doSend();
     }
   };
-  comp.appendChild(ta); comp.appendChild(send);
+  var row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;align-items:flex-end";
+  row.appendChild(imgBtn);
+  row.appendChild(ta);
+  row.appendChild(send);
+  comp.appendChild(row);
   main.appendChild(comp);
-  thread.scrollTop = thread.scrollHeight;
+  // Smart scroll: only scroll to bottom if user was already at bottom
+  var prev = scrollState[chat.phone] || {};
+  var wasAtBottom = prev.wasAtBottom !== false; // default true on first open
+  if (wasAtBottom) {
+    thread.scrollTop = thread.scrollHeight;
+  } else {
+    thread.scrollTop = prev.scrollTop || 0;
+  }
+  // Track scroll position
+  thread.addEventListener("scroll", function __sr() {
+    scrollState[chat.phone] = {
+      wasAtBottom: (this.scrollTop + this.clientHeight >= this.scrollHeight - 40),
+      scrollTop: this.scrollTop
+    };
+  }, { passive: true });
 }
 
 // ---------- search ----------
@@ -998,15 +1168,32 @@ async function handleReview(phone, action, btn) {
 
 // ---------- startup ----------
 loadChats();
-setInterval(() => {
-  loadChats();
+setInterval(async () => {
+  if (pendingImage) return;
+  // Track old msg count before refresh
+  var prCnt = lastMsgCount[activePhone || ""] || 0;
+  await loadChats();
   if (!activePhone) return;
-  // Don't rebuild the chat panel if the user is composing a message —
-  // openChat() does main.innerHTML = "" which would wipe the textarea draft.
-  // Preserves draft when textarea has content OR is currently focused.
-  const _ta = document.querySelector("#composer textarea");
+  // Don't rebuild the chat panel if the user is composing a message
+  var _ta = document.querySelector("#composer textarea");
   if (_ta && (_ta.value.trim() || document.activeElement === _ta)) return;
-  openChat(activePhone);
+
+  // Check if new messages arrived
+  var chat = allChats.find(function(c) { return c.phone === activePhone; });
+  var newCnt = chat ? chat.count : 0;
+  lastMsgCount[activePhone] = newCnt;
+  var hasNewMsgs = newCnt > prCnt && prCnt > 0;
+
+  // Re-render only if user is at bottom or no history
+  var pv = scrollState[activePhone] || {};
+  var atBottom = pv.wasAtBottom !== false;
+
+  if (hasNewMsgs && !atBottom) {
+    // New msgs but user reading history — toast only
+    toast("[New message from " + (chat ? (chat.name || "+" + chat.phone) : activePhone) + "]");
+  } else {
+    openChat(activePhone);
+  }
 }, 5000);
 </script></body></html>`;
 

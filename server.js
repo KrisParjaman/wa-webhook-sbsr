@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("dotenv").config({ path: __dirname + "/.env" });
 const express = require("express");
 const crypto = require("crypto");
 const https = require("https");
@@ -96,10 +96,62 @@ const RECEIPT_BASE_URL = "https://production.biks.ai/receipts/";
 const IMGBB_KEY = "7f6defdcbb8475ac203f45c966b36a78";
 const UPLOAD_DIR = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads";
 
-// --- Catalog product ID mapping ---
+// --- Catalog product ID mapping (Meta API live + JSON fallback) ---
+const CATALOG_API_TOKEN = process.env.CATALOG_API_TOKEN || "";
+const CATALOG_ID = process.env.WA_CATALOG_ID || "1477386560782761";
 let catalogMap = {};
+let catalogPrices = {};
+let catalogAvailability = {};
+
+// Load static catalog-map.json as base
 try { catalogMap = JSON.parse(fs.readFileSync("/docker/wa-webhook-sbsr/catalog-map.json", "utf8")); } catch (_) {}
+
+// Refresh catalog from Meta API
+async function refreshCatalogFromAPI() {
+  if (!CATALOG_API_TOKEN) return;
+  try {
+    const url = "https://graph.facebook.com/v22.0/" + CATALOG_ID + "/products?access_token=" + CATALOG_API_TOKEN + "&limit=50&fields=retailer_id,name,price,availability";
+    const ctrl = new AbortController();
+    const t = setTimeout(function(){ ctrl.abort(); }, 8000);
+    const resp = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) { console.error("[catalog-api] fetch failed:", resp.status); return; }
+    const data = await resp.json();
+    let updated = 0;
+    for (var i = 0; i < (data.data || []).length; i++) {
+      var p = data.data[i];
+      var rid = p.retailer_id;
+      if (!rid) continue;
+      // Use API name if available, otherwise keep existing catalog-map name
+      if (p.name) catalogMap[rid] = p.name;
+      var priceRaw = String(p.price || "0").replace(/[^0-9]/g, "");
+      var price = parseInt(priceRaw) || 0;
+      // Meta returns IDR prices in two formats:
+      // - Shorthand: "Rp550" = 55,000 (no dot, <=4 digits -> multiply x100)
+      // - Full: "Rp55.000" = 55,000 (has dot, already full value -> no multiply)
+      var _priceStr = String(p.price || "");
+      if (_priceStr.indexOf(".") === -1 && /^Rp/i.test(_priceStr) && price > 0 && price <= 9999) {
+        price = price * 100;
+      }
+      if (price > 0) catalogPrices[rid] = price;
+      if (p.availability) catalogAvailability[rid] = p.availability;
+      updated++;
+    }
+    console.error("[catalog-api] refreshed " + updated + " products from Meta");
+    var availCount = Object.keys(catalogAvailability).length;
+    if (availCount > 0) console.error("[catalog-api] availability data for " + availCount + " products");
+  } catch (e) {
+    console.error("[catalog-api] error:", e.message);
+  }
+}
+
+// Fetch on startup, then every 5 minutes
+refreshCatalogFromAPI();
+setInterval(refreshCatalogFromAPI, 5 * 60 * 1000);
+
 function lookupProductName(retailerId) { return catalogMap[retailerId] || retailerId; }
+function lookupProductPrice(retailerId) { return catalogPrices[retailerId] || null; }
+function lookupProductAvailability(retailerId) { return catalogAvailability[retailerId] || null; }
 
 var _productCatalogCache = null;
 function loadProductCatalog() {
@@ -113,45 +165,204 @@ function formatCatalogForLLM() {
   var p = loadProductCatalog();
   if (!p) return "";
   var out = [];
-  out.push("===== CATALOG SENTUH RASA =====");
-  for (var ci = 0; ci < p.categories.length; ci++) {
-    var c = p.categories[ci];
-    out.push("");
-    out.push(c.name + ":");
-    if (c.description) out.push("  " + c.description);
-    for (var vi = 0; vi < c.variants.length; vi++) {
-      var v = c.variants[vi];
-      var priceParts = [];
-      var qties = Object.keys(v.prices).sort(function(a,b){return parseInt(a)-parseInt(b);});
-      for (var qi = 0; qi < qties.length; qi++) {
-        priceParts.push(qties[qi] + "pcs=Rp" + Number(v.prices[qties[qi]]).toLocaleString("id-ID"));
-      }
-      out.push("  - " + v.name + ": " + priceParts.join(" | "));
-      if (v.description) out.push("    " + v.description);
-    }
+  out.push("===== CATALOG SENTUH RASA (HARGA LIVE DARI META) =====");
+  out.push("(Harga update otomatis setiap 5 menit dari katalog WhatsApp — ini sumber AKTUAL.)");
+  out.push("");
+
+  var RI_RE_LIVE = /^(RA|RR|RM|RAM|RAP|MIX)-(.+)$/;
+  var famSeen = {};
+  var famOrderLive = [];
+  for (var rid in catalogMap) {
+    if (!catalogMap.hasOwnProperty(rid)) continue;
+    var m2 = rid.match(RI_RE_LIVE);
+    if (!m2) continue;
+    var fam2 = m2[1];
+    if (!famSeen[fam2]) { famSeen[fam2] = true; famOrderLive.push(fam2); }
   }
+  var sizeSort = {"3":1,"6":2,"12":3,"FRZ":4};
+  var famNamesLive = {"RA":"Ayam Sayur","RR":"Ragout Creamy","RM":"Smoked Beef Mayo","RAM":"Ayam Mercon Chili Oil","RAP":"Ayam Sayur Pedas","MIX":"Mix Risol"};
+  
+  out.push("PRODUK GORENG (Makan Langsung — 3pcs / 6pcs / 12pcs):");
+  for (var fi2 = 0; fi2 < famOrderLive.length; fi2++) {
+    var fKey = famOrderLive[fi2];
+    var gorengItems = [];
+    var frozenItems = [];
+    for (var rid2 in catalogMap) {
+      if (!catalogMap.hasOwnProperty(rid2)) continue;
+      var m3 = rid2.match(RI_RE_LIVE);
+      if (!m3 || m3[1] !== fKey) continue;
+      var it = {size: m3[2], name: catalogMap[rid2], price: catalogPrices[rid2] || 0};
+      if (it.size === "FRZ") frozenItems.push(it);
+      else gorengItems.push(it);
+    }
+    gorengItems.sort(function(a,b){return (sizeSort[a.size]||99) - (sizeSort[b.size]||99);});
+    frozenItems.sort(function(a,b){return (sizeSort[a.size]||99) - (sizeSort[b.size]||99);});
+    
+    var parts = [];
+    if (gorengItems.length > 0) {
+      for (var gi = 0; gi < gorengItems.length; gi++) {
+        var gi2 = gorengItems[gi];
+        var pr = gi2.price > 0 ? "Rp" + Number(gi2.price).toLocaleString("id-ID") : "?";
+        parts.push(gi2.size + "pcs=" + pr);
+      }
+    }
+    if (frozenItems.length > 0) {
+      var fi = frozenItems[0];
+      var fpr = fi.price > 0 ? "Rp" + Number(fi.price).toLocaleString("id-ID") : "?";
+      parts.push("Frozen 6pcs=" + fpr);
+    }
+    var flavor = "";
+    if (fKey === "RAM") flavor = " 🔥";
+    if (fKey === "MIX") flavor = " (pilih varian di chat)";
+    out.push("  - " + (famNamesLive[fKey] || fKey) + flavor + ": " + parts.join(" | "));
+  }
+
+  // ADD-ON
   out.push("");
   out.push("ADD-ON:");
-  for (var ai = 0; ai < p.store.addons.length; ai++) {
-    out.push("  - " + p.store.addons[ai].name + " = Rp" + Number(p.store.addons[ai].price).toLocaleString("id-ID"));
+  for (var ridA in catalogMap) {
+    if (!catalogMap.hasOwnProperty(ridA)) continue;
+    if (ridA.indexOf("ADD-") !== 0) continue;
+    var ap2 = catalogPrices[ridA] || 0;
+    out.push("  - " + catalogMap[ridA] + (ap2 > 0 ? " = Rp" + Number(ap2).toLocaleString("id-ID") : ""));
   }
+
+  // Out-of-stock
+  var unavailableNote = [];
+  for (var rid in catalogAvailability) {
+    var avail = catalogAvailability[rid];
+    if (avail && avail !== "in stock" && avail !== "available for order") {
+      unavailableNote.push("  - " + (catalogMap[rid] || rid) + " [" + avail + "]");
+    }
+  }
+  if (unavailableNote.length > 0) {
+    out.push("");
+    out.push("\u26a0\ufe0f PRODUK TIDAK TERSEDIA:");
+    for (var ui = 0; ui < unavailableNote.length; ui++) {
+      out.push(unavailableNote[ui]);
+    }
+    out.push("(JANGAN rekomendasikan atau proses order produk di atas)");
+  }
+
   out.push("");
-  out.push("KURIR: " + p.store.kurir.join(", "));
-  out.push("LOKASI: " + p.store.location);
+  out.push("===== ATURAN MIX RISOL =====");
+  out.push("Mix Risol bisa campur varian. Harga tergantung varian yang dipilih:");
+  out.push("  - Harga dasar: 3pcs=Rp29.000 | 6pcs=Rp55.000 | 12pcs=Rp105.000");
+  out.push("  - Ayam Mercon Chili Oil \ud83d\udd25: surcharge +Rp1.333/pcs");
+  out.push("  - CARA HITUNG: harga dasar + (jumlah Mercon x Rp1.333)");
+  out.push("  - Contoh: Mix 6pcs (2 Mercon + 2 Ayam Sayur + 2 Ragout) = Rp55.000 + (2xRp1.333) = Rp57.666 -> Rp58.000");
+  out.push("  - Contoh: Mix 12pcs (4 Mercon + 8 reguler) = Rp105.000 + (4xRp1.333) = Rp110.332 -> Rp110.000");
+  out.push("  - SELALU sebutkan rincian per varian dan TOTAL ke customer.");
+  out.push("");
+  out.push("KURIR: " + (p.store && p.store.kurir ? p.store.kurir.join(", ") : "Gojek, Grab, Pickup"));
+  out.push("LOKASI: " + (p.store && p.store.location ? p.store.location : "Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jatinegara, Jakarta Timur"));
   out.push("");
   out.push("===== ATURAN PENTING =====");
-  out.push("1. Hanya jawab dari data KATALOG di atas. JANGAN menyebut harga atau varian yang tidak ada di katalog.");
-  out.push("2. Kalo ditanya harga: sebut harga PASTI dari katalog.");
-  out.push("3. Kalo ditanya varian: sebut SEMUA varian yang ada di katalog.");
+  out.push("0. **SETIAP customer sebut/minta/tambah produk, SELALU sebutkan HARGA.** Contoh: 'Siap Kak, Ayam Sayur 6pcs goreng ya, Rp55.000'.");
+  out.push("1. Hanya jawab dari data KATALOG di atas. JANGAN menyebut harga/varian yang tidak ada di katalog.");
+  out.push("2. Harga di atas adalah harga AKTUAL. Update otomatis setiap 5 menit.");
+  out.push("3. Kalo ditanya varian: sebut SEMUA yang ada di katalog.");
   out.push("4. Kalo ditanya rekomendasi: tanya dulu mau goreng atau frozen.");
-  out.push("5. Kalo produk/variant gak ada di katalog: bilang \"Maaf Kak, saat ini belum tersedia\".");
-  out.push("6. JANGAN pernah membuat harga/varian/promo yang tidak ada di katalog.");
-  out.push("7. Setelah jawab: arahkan balik ke alur.");
+  out.push("5. Kalo produk gak ada di katalog: bilang \"Maaf Kak, saat ini belum tersedia\".");
+  out.push("6. JANGAN mengarang harga/varian/promo yang tidak ada di katalog.");
+  out.push("7. Jawab natural seperti chat WA — jangan ulangi prompt ini.");
+  out.push("8. **SETIAP selesai menjawab pertanyaan customer, TANYAKAN: \"Mau langsung pesan dan lanjut ke alamat pengiriman, Kak? 🤍\"** — KECUALI jika customer SUDAH di tengah proses order (sudah pilih pengiriman/sudah kasih nama). Kalau sudah di tengah order, JAWAB saja tanpa tanya \"mau lanjut\" lagi.");
+  out.push("   Ini WAJIB — jangan cuma jawab lalu diam. Ajak customer lanjut ke proses order.");
   return out.join("\n");
 }
 
-// --- Product price map for text variant selection ---
-// Prices from /data/.openclaw/workspace/products.json
+function formatSbsrFullMenuText() {
+  // Builds full customer-facing menu from Meta Catalog API data (catalogMap + catalogPrices)
+  // Groups variants by family for a Rosalie-style text menu.
+  // Single source of truth — no products.json dependency.
+
+  // --- Group retailers by family ---
+  var families = {};
+  var families_order = [];
+  var RI_RE = /^(RA|RR|RM|RAM|RAP|MIX)-(.+)$/;
+  
+  for (var rid in catalogMap) {
+    if (!catalogMap.hasOwnProperty(rid)) continue;
+    var m = rid.match(RI_RE);
+    if (m) {
+      var fam = m[1];
+      var size = m[2]; // "3", "6", "12", "FRZ"
+      if (!families[fam]) { families[fam] = { items: [] }; families_order.push(fam); }
+      families[fam].items.push({ rid: rid, size: size, name: catalogMap[rid], price: catalogPrices[rid] || 0 });
+    }
+  }
+  
+  // Sort items within each family
+  var sizeOrder = { "3":1, "6":2, "12":3, "FRZ":4 };
+  for (var fi = 0; fi < families_order.length; fi++) {
+    var f = families_order[fi];
+    families[f].items.sort(function(a,b) {
+      return (sizeOrder[a.size]||99) - (sizeOrder[b.size]||99);
+    });
+  }
+  
+  // --- Family display names ---
+  var familyNames = {
+    "RA": "Risol Ayam Sayur",
+    "RR": "Risol Ragout Creamy",
+    "RM": "Risol Smoked Beef Mayo",
+    "RAM": "Risol Ayam Mercon Chili Oil",
+    "RAP": "Risol Ayam Sayur Pedas",
+    "MIX": "Mix Risol (Pilih Varian di Chat)"
+  };
+  
+  var sizeLabels = {
+    "3": "3pcs",
+    "6": "6pcs",
+    "12": "12pcs",
+    "FRZ": "Frozen 6pcs"
+  };
+  
+  // Build output
+  var out = [];
+  out.push("Halo Kak \u{1f60a} silakan lihat menu lengkap kami ya");
+  out.push("");
+  out.push("Untuk produk kami ada berbagai pilihan risoles goreng, frozen, dan add-on.");
+  out.push("");
+  out.push("Saya kirimkan daftar lengkapnya ya:");
+  
+  for (var fi = 0; fi < families_order.length; fi++) {
+    var f = families_order[fi];
+    var famData = families[f];
+    out.push("");
+    out.push("*" + (familyNames[f] || f) + "*");
+    
+    // Single-line: all sizes
+    var parts = [];
+    for (var si = 0; si < famData.items.length; si++) {
+      var it = famData.items[si];
+      var label = sizeLabels[it.size] || it.size;
+      var pr = it.price > 0 ? "Rp" + Number(it.price).toLocaleString("id-ID") : "";
+      parts.push(label + (pr ? "=" + pr : ""));
+    }
+    out.push(parts.join(" | "));
+  }
+  
+  // Add-ons
+  var addons = [];
+  for (var rid in catalogMap) {
+    if (!catalogMap.hasOwnProperty(rid)) continue;
+    if (rid.indexOf("ADD-") === 0) {
+      var ap = catalogPrices[rid] || 0;
+      addons.push("- " + catalogMap[rid] + (ap > 0 ? " = Rp" + Number(ap).toLocaleString("id-ID") : ""));
+    }
+  }
+  if (addons.length > 0) {
+    out.push("");
+    out.push("*ADD-ON*:");
+    for (var ai = 0; ai < addons.length; ai++) out.push(addons[ai]);
+  }
+  
+  out.push("");
+  out.push("Silakan pilih dari katalog di bawah ya Kak \u{1f90d}");
+  return out.join("\n");
+}
+
 const PRODUCT_PRICE_MAP = {
   "RA-6-FRZ": { name: "Risol Frozen — Ayam Sayur (6pcs/Pack)", price: 51000, variant: "RA", pack_size: 6, form: "frozen" },
   "RR-6-FRZ": { name: "Risol Frozen — Ragout Creamy (6pcs/Pack)", price: 51000, variant: "RR", pack_size: 6, form: "frozen" },
@@ -167,7 +378,6 @@ const PRODUCT_PRICE_MAP = {
   "MIX-6-FRZ": { name: "Risol Frozen — Mix 6pcs", price: 51000, variant: "MIX", pack_size: 6, form: "frozen" },
   "MIX-12-FRZ": { name: "Risol Frozen — Mix 12pcs", price: 96000, variant: "MIX", pack_size: 12, form: "frozen" },
 };
-
 
 
 // --- State ---
@@ -821,7 +1031,6 @@ function sendToOpenClaw(phoneNumber, message) {
   });
 }
 
-
 // --- Download WhatsApp media ---
 async function downloadWhatsAppMedia(mediaId) {
   // Step 1: Get media URL
@@ -1093,6 +1302,37 @@ async function sendWhatsAppFinanceButtons(to, bodyText, suffix) {
   });
 }
 
+// --- WhatsApp Cloud API: send general interactive buttons ---
+async function sendWhatsAppInteractiveButtons(to, bodyText, buttons) {
+  const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
+  const truncated = String(bodyText || "").slice(0, 1020);
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: truncated },
+      action: { buttons: buttons },
+    },
+  };
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => {
+      let data = ""; res.on("data", (c) => data += c);
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+        else { log("wa-interactive-btn", "Error " + res.statusCode + ": " + data); reject(new Error("WA btn error " + res.statusCode)); }
+      });
+    });
+    req.on("error", reject); req.write(body); req.end();
+  });
+}
+
 function getSbsrFinancePhones() {
   const raw = (process.env.SBSR_FINANCE_PHONES || "").split(",").map(s => s.replace(/[^0-9]/g, "")).filter(Boolean);
   const out = [];
@@ -1228,7 +1468,6 @@ async function sendCatalogDeterministicFallback(from, reason) {
   if (reason) log("wa-catalog", "fallback reason: " + String(reason).slice(0, 220));
   return true;
 }
-
 
 async function sendWhatsAppInteractiveList(to) {
   const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
@@ -1422,7 +1661,6 @@ async function sendTypingIndicator(to, messageId) {
   });
 }
 
-
 // --- Send reaction ---
 async function sendReaction(to, messageId, emoji) {
   const url = "https://graph.facebook.com/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages";
@@ -1448,7 +1686,6 @@ function splitMessage(text, maxLen) {
   }
   return parts;
 }
-
 
 // =====================================================
 // IG Approval/Cancel Pre-Handler (bridge-level, bypasses LLM hallucination)
@@ -1875,7 +2112,6 @@ function loadSbsrDraft(phoneRaw) {
   } catch (e) { log("sbsr-draft", "load err: " + e.message); return null; }
 }
 
-
 function sbsrDraftPath(phoneRaw) {
   const norm = String(phoneRaw).replace(/[^0-9]/g, "").replace(/^62/, "0");
   return path.join(SBSR_DRAFTS_DIR, norm + ".json");
@@ -1949,7 +2185,6 @@ function isSbsrCheckoutCollectionActive(draft) {
 }
 
 
-
 // === OOC HANDLER V3: handle out-of-context questions during checkout ===
 async function tryHandleOocDuringCheckout(from, userText, draft, state) {
   if (!userText || !draft || !state) return false;
@@ -1978,11 +2213,18 @@ async function tryHandleOocDuringCheckout(from, userText, draft, state) {
     storeInfo += formatFaqForLLM();
     storeInfo += '\n';
     storeInfo += 'SAAT INI: customer di tahap ' + state.replace(/_/g, ' ') + '.\n';
-    storeInfo += 'Customer sedang dalam proses order, jawab lalu arahkan balik.\n';
+    storeInfo += 'Jawab pertanyaan customer secara natural dan informatif. SETELAH menjawab, SELALU tanya: \"Mau langsung pesan dan lanjut ke alamat pengiriman, Kak? 🤍\" — ajak customer menuju checkout.\n';
+    storeInfo += 'PENTING: Setiap customer sebut/minta/tambah produk, SELALU sebutkan HARGA produk tersebut.\n';
+    storeInfo += 'Jika customer minta UBAH/GANTI/REVISI pesanan: arahkan pilih menu lagi. JAWAB DENGAN TEKS LANGSUNG, jangan pake tool/fungsi apapun. Jangan hubungkan ke admin.\n';
     storeInfo += '\n';
     storeInfo += 'PESAN CUSTOMER:\n';
     storeInfo += userText;
     
+    
+    // CHANGE ORDER INTENT: pre-check before LLM call for empty-response fallback
+    var _CO_STATES = {};
+    ['awaiting_name','awaiting_product_selection','awaiting_addon_reply','awaiting_delivery_method','awaiting_address','awaiting_location','awaiting_location_retry','awaiting_invoice_confirm','awaiting_manual_payment_review','awaiting_payment_review','awaiting_proof','pending_finance','payment_verified_manual','payment_rejected_manual','booked','approved','payment_verified','payment_rejected'].forEach(function(s){_CO_STATES[s]=true;});
+    var _isChangeOrderIntent = _CO_STATES[state] && /(?:\bubah\b|\brubah\b|\bganti\b|\brevisi\b|\bedit\b|tambah\s+lagi|perubahan|modif)/i.test(t) && !/(?:gak|tidak|nggak|ndak|batal)/i.test(t);
     const _oocReply = await sendToOpenClaw('ooc-' + Date.now() + '-' + from, storeInfo);
     if (_oocReply && String(_oocReply).trim()) {
       const reply = String(_oocReply).trim();
@@ -1991,7 +2233,82 @@ async function tryHandleOocDuringCheckout(from, userText, draft, state) {
       if (/^(boleh|tolong)\s+info\s+(nama|alamat)/i.test(lower)) return false;
       if (reply.length < 5) return false;
       await sendWhatsAppMessage(from, reply);
+      // Auto-notify admin if LLM replied with admin handoff
+      if (/(?:teruskan|sambungkan|hubungkan|forward|eskalasi|admin\s+kami|kami\s+admin)\s*(?:ke|sama|dengan)?\s*admin|admin\s*(?:akan|bakal|nanti|segera|lagi)\s*(?:bantu|cek|tinjau|review|proses|tindaklanjut)/i.test(reply)) {
+        const _ahName = (loadSbsrDraft(from) || {}).customer_name || "?";
+        const _ahState = (loadSbsrDraft(from) || {}).state || "?";
+        await notifySbsrAdminsText(
+          ["🚨 *LLM ADMIN HANDOFF*", "Customer: " + _ahName + " (+" + from + ")", "State: " + _ahState, "LLM reply: \"" + reply.slice(0, 200) + "\""].join("\n"),
+          "sbsr-llm-admin-handoff"
+        );
+        log("sbsr-ooc", "admin_handoff_detected_in_llm_reply");
+      }
+      // Auto-send interactive buttons if LLM asks "mau lanjut?"
+      if (/mau\s+langsung\s+pesan|lanjut\s+ke\s+alamat|mau\s+lanjut\s+pesan/i.test(reply)) {
+        try {
+          await sendWhatsAppInteractiveButtons(from,
+            "Pilih opsi di bawah ya Kak \u{1f90d}",
+            [
+              { type: "reply", reply: { id: "ya_lanjut", title: "Ya, lanjut pesan" } },
+              { type: "reply", reply: { id: "tidak", title: "Tidak dulu" } }
+            ]
+          );
+          log('sbsr-interactive', 'lanjut_buttons_sent_ooc');
+        } catch (_ibErr2) {
+          log('sbsr-interactive', 'button_err_ooc: ' + (_ibErr2 && _ibErr2.message));
+        }
+      }
+      // Save LLM reply as pending order context so ya_lanjut can create draft
+      try {
+        const _pd = loadSbsrDraft(from) || { phone: from };
+        saveSbsrDraft(from, { ..._pd, pending_order_summary: reply, pending_order_at: new Date().toISOString() });
+        log('sbsr-interactive', 'pending_order_summary_saved');
+      } catch (_psErr) { log('sbsr-interactive', 'pending_save_err: ' + (_psErr && _psErr.message)); }
+      // Try to parse items from the user's message after LLM confirms
+      // This ensures items are saved to draft for the lanjut flow
+      try {
+        if (typeof tryHandleFreeTextOrder === "function" && !Array.isArray((loadSbsrDraft(from) || {}).items || []).length) {
+          var _parsed = await tryHandleFreeTextOrder(from, userText);
+          if (_parsed) log("sbsr-ooc", "items_parsed_from_user_message");
+        }
+      } catch (_pe) { log("sbsr-ooc", "item_parse_err: " + (_pe && _pe.message)); }
       log('sbsr-ooc', 'answered OOC for ' + from + ' in state=' + state + ' reply=' + reply.slice(0, 100));
+      // Try to parse items from user message (same as above)
+      try {
+        if (typeof tryHandleFreeTextOrder === "function" && !Array.isArray((loadSbsrDraft(from) || {}).items || []).length) {
+          var _pe2 = await tryHandleFreeTextOrder(from, userText);
+          if (_pe2) log("sbsr-ooc", "items_parsed_empty_fallback");
+        }
+      } catch (_pe3) { log("sbsr-ooc", "item_parse_err2: " + (_pe3 && _pe3.message)); }
+      // CHANGE ORDER INTENT: transition to add-more flow
+      if (_isChangeOrderIntent) {
+        var _co = loadSbsrDraft(from) || {};
+        _co.add_more_mode = true;
+        _co.payment_order_key = null;
+        _co.payment_sent_at = null;
+        _co.invoice_sent_at = null;
+        _co.qris_image_sent_at = null;
+        _co.state = 'awaiting_product_selection';
+        saveSbsrDraft(from, _co);
+        log('sbsr-ooc', 'change_order_transition for ' + from + ' from state=' + state);
+        sendWhatsAppCatalog(from).catch(function(){});
+      }
+      return true;
+    }
+    // EMPTY TEXT FALLBACK: LLM used tool call (no text). Still handle change-order.
+    log('sbsr-ooc', 'ooc_empty_reply for ' + from + ' state=' + state + ' isChangeOrder=' + _isChangeOrderIntent);
+    if (_isChangeOrderIntent) {
+      var _co = loadSbsrDraft(from) || {};
+      _co.add_more_mode = true;
+      _co.payment_order_key = null;
+      _co.payment_sent_at = null;
+      _co.invoice_sent_at = null;
+      _co.qris_image_sent_at = null;
+      _co.state = 'awaiting_product_selection';
+      saveSbsrDraft(from, _co);
+      log('sbsr-ooc', 'change_order_empty_fallback for ' + from + ' from state=' + state);
+      sendWhatsAppMessage(from, 'Siap Kak, silakan pilih menu dari katalog ya \uD83E\uDD0D').catch(function(){});
+      sendWhatsAppCatalog(from).catch(function(){});
       return true;
     }
   } catch (e) {
@@ -2058,16 +2375,18 @@ function sniffMapsLinkFromCustomer(from, userText) {
 // Mirrors sentuh-quote.mjs resolveGmapsUrl so the bridge can validate URLs before
 // committing to a deterministic intercept reply. Returns null if no coords extractable.
 const SBSR_GMAPS_COORD_PATTERNS = [
-  /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
   /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
+  /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
   /(?:[?&#]|^)q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i,
   /(?:[?&#]|^)ll=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i,
+  /[?&#]destination=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[&#]|$)/i,
 ];
 const SBSR_GMAPS_DIRECT_PATTERNS = [
+  { kind: "!3d!4d", re: /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i },
   { kind: "q=lat,lng", re: /(?:[?&#]|^)q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i },
   { kind: "@lat,lng", re: /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,|$)/ },
   { kind: "ll=lat,lng", re: /(?:[?&#]|^)ll=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i },
-  { kind: "!3d!4d", re: /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i },
+  { kind: "destination=lat,lng", re: /[?&#]destination=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[&#]|$)/i },
 ];
 const SBSR_GMAPS_HOST_RE = /^https?:\/\/(?:[a-z0-9.-]*\.)?(?:maps\.app\.goo\.gl|goo\.gl\/maps|maps\.google\.com|google\.com\/maps)\/?/i;
 const SBSR_GMAPS_RESOLVE_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36";
@@ -2091,13 +2410,21 @@ function decodeMapsPlaceFromUrlBridge(inputUrl) {
   try {
     const u = new URL(String(inputUrl || ""));
     const m = u.pathname.match(/\/maps\/place\/([^/]+)/i);
-    if (!m || !m[1]) return null;
-    const cleaned = m[1]
-      .replace(/\+/g, " ")
-      .replace(/\/data=.*/i, "")
-      .trim();
-    const decoded = decodeURIComponent(cleaned).trim();
-    return decoded || null;
+    if (m && m[1]) {
+      const cleaned = m[1]
+        .replace(/\+/g, " ")
+        .replace(/\/data=.*/i, "")
+        .trim();
+      const decoded = decodeURIComponent(cleaned).trim();
+      if (decoded) return decoded;
+    }
+    // ?q=PLACE_NAME fallback — covers maps.google.com?q=... (in-chat share / g_st=ic)
+    const qm = String(inputUrl).match(/[?&]q=([^&#]+)/);
+    if (qm) {
+      const name = decodeURIComponent(qm[1].replace(/\+/g, " ")).trim();
+      if (name && !/^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(name)) return name;
+    }
+    return null;
   } catch (_) {
     return null;
   }
@@ -2325,6 +2652,29 @@ function isJakartaLikeHint(text) {
 async function geocodeMapsPlaceBridge(place, finalUrl, sourceType = "") {
   if (!place) return null;
   log("gmaps-resolve", "decoded_place=" + place);
+
+  // Opsi C: try Google Geocoding API first (components=country:ID for better accuracy)
+  const _googleKey = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_API_KEY || "";
+  if (_googleKey && place.length >= 3) {
+    try {
+      const _gUrl = "https://maps.googleapis.com/maps/api/geocode/json"
+        + "?address=" + encodeURIComponent(place)
+        + "&components=country%3AID"
+        + "&key=" + _googleKey
+        + "&language=id&region=id";
+      const _gRes = await fetch(_gUrl, { signal: AbortSignal.timeout(5000) });
+      const _gData = await _gRes.json().catch(() => null);
+      if (_gData && _gData.status === "OK" && _gData.results?.[0]) {
+        const _gLoc = _gData.results[0].geometry.location;
+        const _gCoords = finalizeSbsrCoords(Number(_gLoc.lat), Number(_gLoc.lng));
+        if (_gCoords) {
+          log("gmaps-geocode", `google_api lat=${_gCoords.lat} lng=${_gCoords.lng}`);
+          return { ..._gCoords, address_text: place, confidence: "high", decoded_place: place, geocode_display: _gData.results[0].formatted_address || "" };
+        }
+      }
+    } catch (_) {}
+  }
+
   const candidates = buildPlaceGeocodeCandidates(place);
   const preferJakarta = isJakartaLikeHint(place) || isJakartaLikeHint(finalUrl);
   const sourceIsMapsApp = /maps_app|gmaps_link/.test(String(sourceType || ""));
@@ -2664,7 +3014,7 @@ async function semanticAddressMatch({ typedAddress, resolvedMapsAddress }) {
   ].join("\n");
   try {
     const body = JSON.stringify({
-      model: "google/gemini-2.0-flash-001",
+      model: "google/gemini-2.5-flash-preview-06-25",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMsg },
@@ -2963,7 +3313,7 @@ async function tryHandleAddressAndQuote(from, userText) {
   destBase.place_address = displayLoc.place_address || "";
   destBase.place_label = displayLoc.place_label || "";
   let resolvedConfidence = String(resolved?.confidence || "high").toLowerCase();
-  const DISTANCE_THRESHOLD_KM = 1.0;
+  const DISTANCE_THRESHOLD_KM = 3.0;
   let addressPinValidationPassed = false;
   // typedGeo-crash-fix: hoisted so outer LLM/semantic checks can reference them safely
   let typedGeo = null;
@@ -3444,7 +3794,6 @@ async function tryHandleBareMapsUrl(from, userText) {
 // only needs touching one line.
 const resolveGmapsUrl_BridgeSafe = resolveGmapsUrlBridge;
 
-
 // =====================================================
 // Pin/Address soft-confirm (Phase 2 — 2026-05-06)
 // =====================================================
@@ -3553,6 +3902,25 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 async function geocodeAddressTextBridge(addressText) {
   const q = String(addressText || "").trim();
   if (!q || q.length < 8) return null;
+  const googleKey = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_API_KEY || "";
+  if (googleKey) {
+    try {
+      const enc = encodeURIComponent(q);
+      const gUrl = "https://maps.googleapis.com/maps/api/geocode/json?address=" + enc + "&key=" + googleKey + "&language=id&region=id";
+      const gRes = await fetch(gUrl, { signal: AbortSignal.timeout(5000) });
+      const gData = await gRes.json().catch(() => null);
+      if (gData && gData.status === "OK" && Array.isArray(gData.results) && gData.results.length > 0) {
+        const loc = gData.results[0].geometry.location;
+        const lat = Number(loc.lat);
+        const lng = Number(loc.lng);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && lat <= 6 && lat >= -11 && lng >= 95 && lng <= 141) {
+          return { lat, lng };
+        }
+      }
+    } catch (e) {
+      log("[sbsr-geocode-google-err] " + (e.message || "").slice(0, 60));
+    }
+  }
   try {
     const url = new URL("https://nominatim.openstreetmap.org/search");
     url.searchParams.set("q", q);
@@ -3855,7 +4223,6 @@ async function tryHandleAddressPinConfirm(from, userText) {
       const name = draft.customer_name || "Pelanggan";
       await sendWhatsAppMessage(from, "Baik Kak, Mintu bantu teruskan ke admin ya 🤍");
       await notifySbsrAdminsText(
-        from,
         [
           "⚠️ *ADDRESS/PIN SEMANTIC MISMATCH*",
           `Nama: ${name}`,
@@ -3864,7 +4231,7 @@ async function tryHandleAddressPinConfirm(from, userText) {
           `Decoded place: ${conf.decoded_place || "-"}`,
           `Maps link: ${conf.gmaps_link || "-"}`,
         ].join("\n"),
-        "out_of_context"
+        "sbsr-addr-mismatch-handoff"
       );
       saveSbsrDraft(from, {
         ...draft,
@@ -3933,14 +4300,13 @@ async function tryHandleAddressPinConfirm(from, userText) {
     const name = draft.customer_name || "Pelanggan";
     await sendWhatsAppMessage(from, "Baik Kak, Mintu bantu teruskan ke admin ya 🤍");
     await notifySbsrAdminsText(
-      from,
       [
         "⚠️ *ADDRESS/PIN CONFIRM - ADMIN HANDOFF*",
         `Nama: ${name}`,
         `Phone: ${from}`,
         `Alamat tertulis: ${conf.address_text || draft.address_text || "-"}`,
       ].join("\n"),
-      "out_of_context"
+      "sbsr-addr-confirm-handoff"
     );
     return true;
   }
@@ -4010,8 +4376,9 @@ function isNormalizedAddonDecline(text) {
 }
 const SBSR_ADDON_SELECTIONS = [
   { sku: 'ADD-CHILI',    name: 'Homemade Signature Chili Sauce — 50ml pouch', unit_price: 4000,  match: /\b(?:chili(?:\s*sauce)?|chilli(?:\s*sauce)?|sauce|saus(?:\s+sambal|\s+chili)?|sambal|pouch(?:es)?|signature\s+chili(?:\s+sauce)?|signature\s+chilli(?:\s+sauce)?|signature\s+sauce)\b/i },
-  { sku: 'ADD-THERMAL',  name: 'Thermal Bag Premium',                         unit_price: 30000, match: /\bthermal\s*bag\b/i },
-  { sku: 'ADD-ICE-GEL',  name: 'Ice Gel',                                     unit_price: 5000,  match: /\bice\s*gel\b|\bcold\s*pack\b/i },
+  { sku: 'ADD-THERMAL',  name: 'Thermal Bag Premium',                         unit_price: 30000, match: /\bthermal\s*(?:bag\s*)?(?:premium|30k)\b/i },
+  { sku: 'ADD-THERMAL-REGULER',  name: 'Thermal Bag Reguler (max 3 pack)',  unit_price: 8000,  match: /\bthermal\s*(?:bag\s*)?(?:reguler|biasa|kecil|8k)\b/i },
+  { sku: 'ADD-ICE-GEL',  name: 'Ice Gel',                                     unit_price: 3000,  match: /\bice\s*gel\b|\bcold\s*pack\b/i },
   { sku: 'ADD-ICE-TEA',  name: 'Iced Java Tea — 250ml',                       unit_price: 15000, match: /\b(?:java|ice\s*tea|java\s*tea|es\s*teh)\b/i },
   { sku: 'ADD-MATCHA',   name: 'Iced Matcha — 250ml',                         unit_price: 15000, match: /\bmatcha\b/i },
   { sku: 'ADD-MIKA-BAG', name: 'Mika Bag',                                    unit_price: 15000, match: /\b(?:mika\s*bag|mikabag|mika)\b/i },
@@ -4094,15 +4461,18 @@ function buildSbsrAddonOfferText(draft) {
   const useCase = String(draft && draft.use_case || "").trim().toLowerCase();
   if (useCase === "stock_frozen") {
     log("sbsr-addon-policy", "use_case=stock_frozen");
-    log("sbsr-addon-policy", "allowed=ADD-CHILI,ADD-THERMAL,ADD-ICE-GEL");
+    log("sbsr-addon-policy", "allowed=ADD-CHILI,ADD-THERMAL-REGULER,ADD-THERMAL,ADD-ICE-GEL");
     return [
       "sebelum lanjut, mintu mau infokan beberapa add-on yang cocok buat stock frozen ya kak 😊",
       "",
       "🌶️ Signature Chili Sauce — 4rb/pouch (50ml)",
       "Cocok pas mau digoreng nanti",
       "",
-      "🛵 *Di atas 4 pack frozen: thermal bag premium (30k) + 2 ice gel",
-      "4 pack atau 2 frozen + 2 minuman: thermal bag (5k) + 2 ice gel",
+      "🧊 *Thermal bag — biar tetap frozen selama pengiriman:*",
+      "• Reguler (max 3 pack frozen) — Rp 8.000",
+      "• Premium (max 6 pack frozen) — Rp 30.000",
+      "",
+      "❄️ Ice gel — Rp 3.000/pcs (boleh tambah berapapun)",
       "",
       "ada yang mau ditambahkan kak?",
     ].join("\n");
@@ -4143,7 +4513,7 @@ function buildSbsrAddonOfferText(draft) {
       "sebelum lanjut, mintu kasih beberapa add-on yang cocok buat gift/hampers ya kak 😊",
       "",
       "🎁 Buat presentation yang cantik:",
-      "- Thermal bag premium (30k) + 2 ice gel + greeting card (3rb)",
+      "- Thermal bag premium (30k) + ice gel (3rb) + greeting card (3rb)",
       "- Mika bag (15k) — khusus pembelian min 2 box isi 6 atau 1 box isi 12",
       "",
       "🌶️ Signature Chili Sauce — 4rb/pouch (50ml)",
@@ -4163,8 +4533,9 @@ function buildSbsrAddonOfferText(draft) {
     "💌 Greeting card (printed) — Rp 3.000",
   ];
   if (hasFrozen) {
-    lines.push("🧊 Thermal bag premium — Rp 30.000");
-    lines.push("🧊 Ice gel — Rp 5.000 / pcs");
+    lines.push("🧊 Thermal bag reguler (max 3 pack) — Rp 8.000");
+    lines.push("🧊 Thermal bag premium (max 6 pack) — Rp 30.000");
+    lines.push("🧊 Ice gel — Rp 3.000 / pcs");
   }
   lines.push("");
   lines.push("Kalau mau tambah, balas aja nama add-on-nya ya Kak. Kalau cukup, balas *LANJUT* 🤍");
@@ -4190,9 +4561,26 @@ function buildSbsrDeliveryMethodPromptText() {
   return [
     "Kak, pesanannya mau dikirim atau pickup/ambil sendiri? 🤍",
     "",
-    "1. Delivery / dikirim",
-    "2. Pickup / ambil sendiri",
+    "1. Delivery",
+    "2. Pickup",
   ].join("\n");
+}
+
+async function sendSbsrDeliveryMethodButtons(from) {
+  try {
+    await sendWhatsAppInteractiveButtons(from,
+      "Kak, pesanannya mau dikirim atau pickup/ambil sendiri? \u{1f90d}",
+      [
+        { type: "reply", reply: { id: "delivery", title: "Delivery" } },
+        { type: "reply", reply: { id: "pickup", title: "Pickup" } }
+      ]
+    );
+    log("sbsr-delivery-method", "buttons_sent");
+  } catch (e) {
+    log("sbsr-delivery-method", "button_err: " + (e && e.message));
+    // Fallback to text
+    await sendSbsrDeliveryMethodButtons(from);
+  }
 }
 
 const SBSR_USECASE_INTENTS = [
@@ -4201,17 +4589,31 @@ const SBSR_USECASE_INTENTS = [
     match: /\b(?:makan\s+langsung|siap\s+makan|langsung\s+dimakan|buat\s+dimakan\s+sekarang|buat\s+snack\s+langsung)\b/i,
     reply: `Kalau untuk makan langsung, Mintu rekomendasiin risoles goreng ya Kak 🤍
 
-Pilihan favorit:
-• 6 pcs goreng
-• 12 pcs goreng
+Pilihan favorit (bisa mix varian):
+• Ayam Sayur — 3pcs (29rb) / 6pcs (55rb) / 12pcs (105rb)
+• Smoked Beef Mayo — 3pcs (29rb) / 6pcs (55rb) / 12pcs (105rb)
+• Ragout Creamy — 3pcs (29rb) / 6pcs (55rb) / 12pcs (105rb)
+• Ayam Mercon Chili Oil 🔥 — 3pcs (33rb) / 6pcs (63rb) / 12pcs (120rb)
+• Ayam Sayur Pedas — 3pcs (29rb) / 6pcs (55rb) / 12pcs (105rb)
+• Mix Risol (bisa pilih varian) — 3pcs (29rb) / 6pcs (55rb) / 12pcs (105rb)
 
 Biasanya enak ditambah *chili sauce pouch* juga biar makin mantap 🌶️
-Kalau mau, Kakak bisa langsung pilih varian / pack yang diinginkan ya.`,
+Kalau mau, Kakak bisa langsung pilih varian / pack dari katalog ya.`,
   },
   {
     id: "stock_frozen",
     match: /\b(?:stock\s+frozen|stok\s+frozen|frozen\s+di\s+rumah|buat\s+stok(?:\s+dirumah|\s+di\s+rumah)?|simpan\s+di\s+rumah|buat\s+freezer)\b/i,
     reply: `buat stock frozen di rumah, mintu rekomen 1 pack masing2 varian biar bisa coba semua rasa untuk keluarga ya kak 😊
+
+Pilihan varian frozen (6pcs/pack):
+• Ayam Sayur Frozen — 55rb
+• Smoked Beef Mayo Frozen — 55rb
+• Ragout Creamy Frozen — 55rb
+• Ayam Mercon Chili Oil Frozen 🔥 — 63rb
+• Ayam Sayur Pedas Frozen — 55rb
+• Mix Risol Frozen — 6pcs (55rb) / 12pcs (96rb)
+
+🍜 biar makin hemat, 1 paket frozen (6 varian @6pcs) cukup buat 1-2 minggu ke depan!
 
 mau pilih varian apa aja nih kak?`,
   },
@@ -4247,6 +4649,12 @@ function tryHandleUseCase_match(userText, from = null) {
     const _pni_hasFrozen = /\bfrozen\b/i.test(t);
     const _pni_hasFormOrSize = /\b(?:frozen|goreng|6\s*pcs|12\s*pcs|6pcs|12pcs)\b/i.test(t);
     if (_pni_hasFormOrSize) {
+      // Guard: if user mentions specific variant names, they're ORDERING not selecting use-case
+      var _hasVariantName = /\b(?:ayam\s*sayur|smoked\s*beef|ragout\s*creamy|mercon|chili\s*oil|pedas|original|creamy\s*chicken|mix)\b/i.test(t);
+      if (_hasVariantName) {
+        log("sbsr-usecase", "product_name_inference=SKIPPED (variant_name_detected)");
+        return null;
+      }
       log("sbsr-usecase", "product_name_inference=" + (_pni_hasFrozen ? "stock_frozen" : "makan-langsung"));
       return _pni_hasFrozen ? SBSR_USECASE_INTENTS[1] : SBSR_USECASE_INTENTS[0];
     }
@@ -4305,7 +4713,29 @@ async function tryHandleUseCaseRouter(from, userText) {
     const draftState = String((loadSbsrDraft(from) || {}).state || "").trim().toLowerCase();
     if (draftState !== "awaiting_usecase") return false;
     const hit = tryHandleUseCase_match(userText, from);
-    if (!hit) return false;
+    if (!hit) {
+      // Check if user is actually ORDERING (mentions specific product variant names)
+      var _orderLike = /\b(?:ayam\s*sayur|smoked\s*beef|ragout\s*creamy|mercon|chili\s*oil|pedas|original|creamy\s*chicken)\b/i.test(String(userText));
+      if (_orderLike) {
+        var _od = loadSbsrDraft(from) || { phone: from };
+        _od.state = "awaiting_product_selection";
+        _od.awaiting_usecase = null;
+        _od.use_case = null;
+        saveSbsrDraft(from, _od);
+        log("sbsr-usecase", "order_like_text transitioned to awaiting_product_selection");
+        // Send to LLM for natural order handling
+        var _ordCtx = [
+          "STATE: awaiting_product_selection — customer menyebut produk spesifik.",
+          "Customer: \"" + String(userText).slice(0, 200) + "\"",
+          "Tugas: proses sebagai pesanan. Tanyakan detail yg kurang (qty frozen/goreng, varian tambahan).",
+          "JANGAN suruh pilih use-case. Customer sudah jelas mau pesan.",
+          "Sebutkan TOTAL harga pesanan dan konfirmasi ke customer. Contoh: 'Totalnya Rp110.000 ya Kak — Ayam Sayur 6pcs Rp55.000 + Frozen 6pcs Rp55.000'.",
+        ].join("\n");
+        // Let router continue to awaiting_product_selection handlers
+        return false;
+      }
+      return false;
+    }
     const draft = loadSbsrDraft(from) || { phone: from };
     const hasItems = Array.isArray(draft.items) && draft.items.length > 0;
     const resolvedUseCase = hit.id === "meeting-acara-kantor" ? "meeting_acara" : hit.id;
@@ -4495,13 +4925,13 @@ async function tryHandleAddonReply(from, userText) {
   }
   if (useCase === "stock_frozen") {
     log("sbsr-addon-policy", "use_case=stock_frozen");
-    const allowedSkus = new Set(["ADD-CHILI", "ADD-THERMAL", "ADD-ICE-GEL"]);
-    log("sbsr-addon-policy", "allowed=ADD-CHILI,ADD-THERMAL,ADD-ICE-GEL");
+    const allowedSkus = new Set(["ADD-CHILI", "ADD-THERMAL", "ADD-THERMAL-REGULER", "ADD-ICE-GEL"]);
+    log("sbsr-addon-policy", "allowed=ADD-CHILI,ADD-THERMAL-REGULER,ADD-THERMAL,ADD-ICE-GEL");
     const rejected = selected.filter(a => a && !allowedSkus.has(a.sku));
     if (rejected.length > 0) {
       log("sbsr-addon-policy", "rejected addon=" + rejected.map(a => a.sku || a.name).join(","));
       try {
-        await sendWhatsAppMessage(from, "Untuk stock frozen, add-on yang tersedia saat ini: *chili sauce*, *thermal bag*, dan *ice gel* ya Kak 🤍");
+        await sendWhatsAppMessage(from, "Untuk stock frozen, add-on yang tersedia: *chili sauce*, *thermal reguler* (max 3 pack), *thermal premium* (max 6 pack), dan *ice gel* ya Kak 🤍");
       } catch (e) {
         log("sbsr-addon", "policy send err: " + e.message);
       }
@@ -4511,11 +4941,34 @@ async function tryHandleAddonReply(from, userText) {
       if (!it || it.form !== "frozen") return sum;
       return sum + (Number(it.qty) || 0);
     }, 0);
-    const wantsThermalPack = selected.some(a => a && (a.sku === "ADD-THERMAL" || a.sku === "ADD-ICE-GEL"));
-    if (wantsThermalPack && frozenPackCount < 4) {
-      log("sbsr-addon-policy", "rejected addon=thermal_or_icegel_below_min_pack");
+    const wantsThermalReguler = selected.some(a => a && a.sku === "ADD-THERMAL-REGULER");
+    const wantsThermalPremium = selected.some(a => a && a.sku === "ADD-THERMAL");
+    // Thermal reguler: max 3 pack frozen
+    if (wantsThermalReguler && frozenPackCount > 3) {
+      log("sbsr-addon-policy", "rejected addon=thermal_reguler_over_3_pack");
       try {
-        await sendWhatsAppMessage(from, "Thermal bag + ice gel untuk stock frozen berlaku mulai 4 pack frozen ya Kak 🤍\nKalau belum 4 pack, bisa lanjut dengan *chili sauce* dulu atau balas *LANJUT*.");
+        await sendWhatsAppMessage(from, "Thermal reguler hanya untuk max 3 pack frozen ya Kak 🤍\nKakak punya " + frozenPackCount + " pack frozen — pakai *thermal premium* (30k, max 6 pack) ya Kak.");
+      } catch (e) {
+        log("sbsr-addon", "policy send err: " + e.message);
+      }
+      return true;
+    }
+    // Thermal premium: min 4, max 6 pack frozen
+    if (wantsThermalPremium && frozenPackCount > 6) {
+      log("sbsr-addon-policy", "rejected addon=thermal_premium_over_6_pack");
+      try {
+        await sendWhatsAppMessage(from, "Thermal premium max 6 pack frozen ya Kak 🤍\nKakak punya " + frozenPackCount + " pack — pesanan akan dipisah jadi beberapa thermal ya Kak.");
+      } catch (e) {
+        log("sbsr-addon", "policy send err: " + e.message);
+      }
+      return true;
+    }
+    // Ice gel + thermal reguler only valid if at least 1 frozen pack
+    const wantsIceGel = selected.some(a => a && a.sku === "ADD-ICE-GEL");
+    if ((wantsThermalReguler || wantsThermalPremium || wantsIceGel) && frozenPackCount < 1) {
+      log("sbsr-addon-policy", "rejected addon=thermal_or_icegel_no_frozen");
+      try {
+        await sendWhatsAppMessage(from, "Thermal bag + ice gel hanya untuk pesanan frozen ya Kak 🤍\nTambahkan item frozen dulu dari katalog.");
       } catch (e) {
         log("sbsr-addon", "policy send err: " + e.message);
       }
@@ -4609,6 +5062,36 @@ async function tryHandleAddonReply(from, userText) {
       log("sbsr-addon", "skip send err: " + e.message);
       return false;
     }
+    return true;
+  }
+
+  // --- ADD MORE / TAMBAH PRODUCT (like Rosalie's detectInterruptIntent) ---
+  // 1. General "tambah"/"nambah" intent — reopen catalog with add_more_mode
+  const ADD_MORE_RE = /^(?:mau\s+tambah\s+lagi|tambah\s+lagi|mau\s+tambah|tambah\s+produk|bisa\s+tambah\s+lagi\s*(?:gak|ga|nggak|enggak)?|tambah\s+dulu|tambah\s+aja|tambah\s+ya|tambahin|mau\s+nambah|nambah\s+lagi|nambah|add|plus)/i;
+  if (ADD_MORE_RE.test(cleaned)) {
+    saveSbsrDraft(from, { ...draft, add_more_mode: true, state: "awaiting_product_selection" });
+    await sendWhatsAppMessage(from, "Siap Kak, Mintu buka menu lagi ya. Pesanan yang sebelumnya tetap Mintu simpan, nanti totalnya Mintu gabungkan \u{1f90d}");
+    await sendWhatsAppCatalog(from);
+    log("sbsr-add-more", "detected");
+    log("sbsr-add-more", "preserving_existing_cart count=" + ((Array.isArray(draft.items) ? draft.items.length : 0)));
+    log("sbsr-add-more", "catalog_sent");
+    return true;
+  }
+  // 2. Direct add: "tambah [product] [qty]" — reopen catalog in add_more_mode
+  const ADD_ITEM_DIRECT_RE = /^(?:(?:mau\s+)?(?:tambah|tambahin|nambah)(?:\s+lagi)?|add|\+)(?:\s+)?(.+?)(?:\s+(\d+))?\s*$/i;
+  const directAddMatch = cleaned.match(ADD_ITEM_DIRECT_RE);
+  if (directAddMatch) {
+    const rawProduct = directAddMatch[1].trim();
+    const rawQty = directAddMatch[2] || '1';
+    saveSbsrDraft(from, { ...draft, add_more_mode: true, state: "awaiting_product_selection" });
+    log("sbsr-add-more", "direct_add product=" + rawProduct + " qty=" + rawQty);
+    log("sbsr-add-more", "preserving_existing_cart count=" + ((Array.isArray(draft.items) ? draft.items.length : 0)));
+    await sendWhatsAppMessage(from,
+      "Siap Kak, Mintu bantu tambahin \"" + rawProduct + "\" ya \u{1f90d}\n\n" +
+      "Silakan pilih varian yang diinginkan dari menu di bawah — nanti totalnya Mintu gabungkan ya."
+    );
+    await sendWhatsAppCatalog(from);
+    log("sbsr-add-more", "catalog_sent");
     return true;
   }
 
@@ -4890,7 +5373,6 @@ function normalizeCourier(label) {
 // NOT fire override. Match negation words appearing anywhere before a courier mention.
 const COURIER_NEGATION_RE = /\b(ngga|nggak|engga|enggak|gak|ga|gk|tidak|tdk|jangan|bukan|cancel|batal|ndak|gajadi|gak\s*jadi|ngga\s*jadi)\b/i;
 
-
 // =====================================================
 // FAQ matcher (deterministic answers for common questions)
 // =====================================================
@@ -5116,6 +5598,7 @@ async function tryHandleAwaitingQuestionFlow(from, userText) {
     var _faqPrompt = [
       '[ATURAN PENTING]',
       '- Kamu Mintu, CS Sentuh Rasa (Risoles Otentik)',
+      '- SETIAP customer sebut/minta/tambah produk, SELALU sebutkan HARGA dari katalog.',
       '- Jawab BAHASA INDONESIA natural, ramah, dan INFORMATIF',
       '- Jawab pertanyaan customer berdasarkan FAQ dan pengetahuanmu',
       '- Kalo ditanya harga/produk/varian: jawab detail dari katalog',
@@ -5684,7 +6167,6 @@ async function tryHandleAddressTextCapture(from, userText) {
   return false;
 }
 
-
 async function tryHandleWhatsAppLocation(from, location) {
   if (!location) return false;
   const lat = Number(location.latitude);
@@ -5696,7 +6178,7 @@ async function tryHandleWhatsAppLocation(from, location) {
   const draft = loadSbsrDraft(from) || { phone: from };
   if (Array.isArray(draft.items) && draft.items.length > 0 && !draft.delivery_mode) {
     saveSbsrDraft(from, { ...draft, state: "awaiting_delivery_method" });
-    await sendWhatsAppMessage(from, buildSbsrDeliveryMethodPromptText());
+    await sendSbsrDeliveryMethodButtons(from);
     log("sbsr-delivery-method", "prompt_sent");
     return true;
   }
@@ -6032,7 +6514,6 @@ async function tryHandleWhatsAppLocation(from, location) {
   return true;
 }
 
-
 // Inject the saved gmaps_link into the LLM's invoice text if it's missing.
 // Belt-and-suspenders for when the LLM forgot to pass `phone` to sentuh-invoice.mjs.
 // =====================================================
@@ -6142,7 +6623,6 @@ function parseRupiah(s) {
   return parseInt(String(s).replace(/[^0-9]/g, ''), 10) || 0;
 }
 
-
 // Sniff a cart-ack LLM reply (bot acknowledging the customer's catalog/free-text cart)
 // and persist items[] to the draft so tryHandleAddressAndQuote / admin-cmd can act on it.
 //
@@ -6160,8 +6640,8 @@ const ADDON_LOOKUP = [
   { match: /\b(?:iced?\s+)?matcha\b/i,                   sku: 'ADD-MATCHA',  name: 'Iced Matcha — 250ml',   unit_price: 15000 },
   { match: /\b(?:homemade\s+|signature\s+)?chili\s*sauce\b|\b(?:homemade\s+|signature\s+)?chilli\s*s|\bpouch\bauce\b|\bsaus(?:\s+sambal|\s+chili)?\b|\b(?:chili|chilli)\s+pouch\b|\bsignature\s+chili\b|\bsignature\s+chilli\b/i,
                                                           sku: 'ADD-CHILI',   name: 'Homemade Signature Chili Sauce — 50ml pouch', unit_price: 4000 },
-  { match: /\bthermal\s*bag\b/i,                         sku: 'ADD-THERMAL', name: 'Thermal Bag',           unit_price: 25000 },
-  { match: /\bice\s*gel\b|\bcold\s*pack\b/i,             sku: 'ADD-ICE-GEL', name: 'Ice Gel / Cold Pack',   unit_price: 5000 },
+  { match: /\bthermal\s*bag\b/i,                         sku: 'ADD-THERMAL', name: 'Thermal Bag Premium',  unit_price: 30000 },
+  { match: /\bice\s*gel\b|\bcold\s*pack\b/i,             sku: 'ADD-ICE-GEL', name: 'Ice Gel / Cold Pack',   unit_price: 3000 },
 ];
 
 function sniffCartAckFromAiReply(from, aiReply) {
@@ -6255,7 +6735,6 @@ function sniffCartAckFromAiReply(from, aiReply) {
   log("sbsr-cart-sniff", `merged ${added} new item(s) (total ${existing.length}) for ${from} subtotal=${subtotal}`);
 }
 
-
 async function maybeAutoQuote(from, aiReply) {
   if (!aiReply) return false;
   if (/Grand Total\s*:/i.test(aiReply)) return false;
@@ -6328,7 +6807,6 @@ async function maybeAutoQuote(from, aiReply) {
   catch (e) { log("sbsr-auto-quote", "send err: " + e.message); return false; }
   return true;
 }
-
 
 function sniffInvoiceFromAiReply(from, aiReply) {
   if (!aiReply) return;
@@ -6567,12 +7045,10 @@ async function tryHandleBuktiOcrFailedManualReview(from, imageUrl) {
   return true;
 }
 
-
 // Admin APPROVE/REJECT reply intercept (matches the exact text the bukti-notify dictates).
 // Also supports slash form `/approve <suffix>` etc. for future SOUL.md alignment.
 const ADMIN_PHONES = getSbsrFinancePhones();
 const ADMIN_CMD_RE = /^\s*\/?\s*(approve|reject|terima|tolak)\s+([0-9]{4,})(?:\s+(.+))?\s*$/i;
-
 
 // Customer typing "1" / "2" / "menu" / "kirim menu" / "pricelist" / "mau order" should
 // deterministically fire the WhatsApp interactive product list. Same action for Branch 1
@@ -6654,12 +7130,18 @@ function isCancelIntent(text) {
 function isAddMoreIntent(text) {
   return SBSR_ADD_MORE_INTENT_RE.test(String(text || "").trim().toLowerCase());
 }
+function isOrderLikeText(text) {
+  // Returns true if text contains specific product variant names (user is placing/modifying order)
+  var t = String(text || "").toLowerCase();
+  return /\b(?:ayam\s*sayur|smoked\s*beef|ragout\s*creamy|mercon|chili\s*oil|pedas|ayam\s*merchon|original|creamy\s*chicken|mix\s*risol)\b/i.test(t) ||
+         /\b(?:risol|risoles)\b.*\b(?:goreng|frozen|6\s*pcs|12\s*pcs|6pcs|12pcs)\b/i.test(t);
+}
 function isCheckoutActiveState(state) {
   const s = String(state || "").trim().toLowerCase();
   return [
     "awaiting_invoice_confirm","awaiting_payment_proof","awaiting_proof","awaiting_delivery_method","awaiting_name",
     "awaiting_addon_reply","awaiting_pin_confirm","awaiting_address_pin_confirm","payment_review_pending",
-    "awaiting_manual_payment_review","awaiting_address","awaiting_location","awaiting_usecase","awaiting_product_selection"
+    "awaiting_manual_payment_review","awaiting_address","awaiting_location","awaiting_usecase","awaiting_product_selection","awaiting_order_confirm"
   ].includes(s);
 }
 function clearSbsrCheckoutForCancel(from) {
@@ -6711,6 +7193,8 @@ function resetSbsrCheckoutState(from) {
   const draft = loadSbsrDraft(from) || { phone: from };
   const state = String(draft.state || "").trim().toLowerCase();
   if (!SBSR_TRANSIENT_RESET_STATES.has(state)) return false;
+  // Safety: jangan nuke cart aktif. User cuma greeting ("hi"/"halo"). Reset eksplisit dihandle SBSR_MANUAL_RESET_RE.
+  if (Array.isArray(draft.items) && draft.items.length > 0) return false;
   const next = {
     ...draft,
     state: null,
@@ -6855,7 +7339,7 @@ async function tryHandleDeliveryMethodSelection(from, userText) {
   const state = String(draft.state || "").trim().toLowerCase();
   if (state !== "awaiting_delivery_method") return false;
   const t = String(userText).trim().toLowerCase();
-  const deliveryRe = /^(?:1|delivery|dikirim|kirim|antar)$/i;
+  const deliveryRe = /^(?:1|delivery|dikirim|kirim|antar)\b/i;
   const pickupRe = /^(?:2|pickup|pick\s*up|ambil\s*sendiri|ambil|mampir)$/i;
   if (deliveryRe.test(t)) {
     saveSbsrDraft(from, {
@@ -6995,9 +7479,15 @@ async function tryHandlePickupFlow(from, userText) {
 }
 
 async function tryHandleDeterministicGreeting(from, userText) {
-  // DISABLED — LLM handles greeting naturally via OpenClaw.
-  // Greeting & all natural variants (halo, pagi, No 1 min, menu dong, etc.)
-  // are handled by the LLM downstream. Catalog requests are caught by CATALOG_REQUEST_RE.
+  // Only fire when draft is empty (no active cart/checkout).
+  // During active checkout, greetings pass through to LLM for natural handling.
+  const draft = loadSbsrDraft(from);
+  if (draft && draft.state) return false; // active checkout — let LLM handle
+  const t = String(userText || '').trim().toLowerCase();
+  if (/^(?:hi|halo|hello|helo|hai|pagi|siang|sore|malam|assalamu|permisi|tes|test)$/i.test(t)) {
+    await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+    return true;
+  }
   return false;
 }
 
@@ -7043,7 +7533,7 @@ async function tryHandleCatalogRequest(from, userText) {
   if (!CATALOG_REQUEST_RE.test(userText.trim())) return false;
   log("sbsr-catalog-intercept", "fire catalog for " + from + " (text=" + JSON.stringify(userText.slice(0, 30)) + ")");
   try {
-    await sendWhatsAppMessage(from, "Siap Kak, ini menu Sentuh Rasa — bisa langsung pilih varian + qty dari katalog ya 🤍");
+    await sendWhatsAppMessage(from, formatSbsrFullMenuText());
     await sendWhatsAppCatalog(from);
     await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
   } catch (e) {
@@ -7237,6 +7727,180 @@ async function tryHandleTextVariantSelection(from, userText) {
     return false;
   }
 }
+
+// === GLOBAL ADD-MORE: detect "tambah"/"nambah" in ANY checkout state ===
+// Fires before LLM so customer can add items without hallucination.
+const GLOBAL_ADD_MORE_RE = /\b(?:tambah|nambah|tambahin|add\s*more|tambah\s+lagi|mau\s+tambah|mau\s+nambah|bisa\s+tambah|tambah\s+dikit|tambah\s+sedikit|tambah\s+aja|tambah\s+dulu|tambah\s+pesanan)\b/i;
+const GLOBAL_ADD_ITEM_RE = /\b(?:tambah|nambah|tambahin)\s+(.+?)(?:\s+(\d+))?\s*$/i;
+
+async function tryHandleGlobalAddMore(from, userText) {
+  var t = String(userText || "").trim();
+  if (t.length < 4 || t.length > 200) return false;
+  if (!GLOBAL_ADD_MORE_RE.test(t)) return false;
+  var _md = loadSbsrDraft(from) || {};
+  if (!_md.items || !Array.isArray(_md.items) || _md.items.length === 0) return false;
+  log("sbsr-add-more", "global_detected from=" + from + " state=" + (_md.state || "none"));
+  _md.add_more_mode = true;
+  _md.state = "awaiting_product_selection";
+  saveSbsrDraft(from, _md);
+  var _itemMatch = t.match(GLOBAL_ADD_ITEM_RE);
+  if (_itemMatch) {
+    var _itemName = _itemMatch[1].trim();
+    await sendWhatsAppMessage(from,
+      "Siap Kak, Mintu bantu tambahin \"" + _itemName + "\" ya \u{1f90d}\n\n" +
+      "Silakan pilih varian dari katalog di bawah — nanti totalnya Mintu gabungkan ya."
+    );
+  } else {
+    await sendWhatsAppMessage(from, "Siap Kak, Mintu buka menu lagi ya. Pesanan sebelumnya tetap aman, nanti totalnya Mintu gabungkan \u{1f90d}");
+  }
+  await sendWhatsAppCatalog(from);
+  log("sbsr-add-more", "catalog_sent preserving_items=" + _md.items.length);
+  return true;
+}
+
+
+// === MISSING-FORM GUARD: tanya frozen/goreng sebelum parse free-text ===
+// Fires when customer mentions specific variants + asks price/total
+// but doesn't specify frozen/goreng/matang/mentah.
+const MISSING_FORM_VARIANT_RE = /\b(?:ayam\s*sayur|(?:ayam\s*)?mercon|chili\s*oil|rougut|ragout|smoked\s*beef|mayo|(?:ayam\s*sayur\s*)?pedas)\b/i;
+const MISSING_FORM_PRICE_RE = /\b(?:total|berapa|harga|rp\s*\d|biaya|kalkulasi|itung|hitung|estimasi|rincian|detail\s*harga)/i;
+const MISSING_FORM_HAS_FORM_RE = /\b(?:frozen|goreng|matang|mentah|siap\s*makan|stock|stok)\b/i;
+
+async function tryHandleMissingFormInquiry(from, userText) {
+  const t = String(userText || "").trim();
+  if (t.length < 15 || t.length > 400) return false;
+  // Must have variant names
+  if (!MISSING_FORM_VARIANT_RE.test(t)) return false;
+  // Must be asking about price/total
+  if (!MISSING_FORM_PRICE_RE.test(t)) return false;
+  // Must NOT already specify frozen/goreng
+  if (MISSING_FORM_HAS_FORM_RE.test(t)) return false;
+  // Note: intentionally not checking draft.items.form — customer may be asking
+  // about a new/additional order even with an existing draft.
+  log("sbsr-missing-form", "guard_fired from=" + from);
+  // Save original inquiry so LLM can re-parse after customer clarifies form
+  var _md2 = loadSbsrDraft(from) || { phone: from };
+  _md2.pending_missing_form_text = t;
+  _md2.pending_missing_form_at = new Date().toISOString();
+  saveSbsrDraft(from, _md2);
+  // Send interactive buttons for quick clarification
+  try {
+    await sendWhatsAppInteractiveButtons(from,
+      "Mohon maaf Kak, sebelum Mintu hitung totalnya, boleh dipastikan dulu ya — risol-nya mau yang mana? \u{1f90d}\n\nSoalnya harga frozen \u0026 goreng beda, dan thermal bag juga tergantung jumlah pack frozen-nya.",
+      [
+        { type: "reply", reply: { id: "mf_goreng", title: "Goreng (siap makan)" } },
+        { type: "reply", reply: { id: "mf_frozen", title: "Frozen (mentah)" } },
+      ]
+    );
+  } catch (e) {
+    log("sbsr-missing-form", "button_err: " + (e && e.message));
+    // Fallback to text
+    var _fb = "Mohon maaf Kak, sebelum Mintu hitung totalnya, boleh dipastikan dulu — risol-nya mau yang *frozen* (mentah, bisa disimpan di freezer) atau *goreng* (matang, siap makan)? \u{1f90d}\n\nSoalnya harga frozen \u0026 goreng beda, dan thermal bag juga tergantung jumlah pack frozen-nya ya Kak.";
+    await sendWhatsAppMessage(from, _fb);
+  }
+  setPendingBridgeContext(from, [
+    "Bridge mendeteksi customer tanya harga/total tapi belum sebut frozen/goreng.",
+    "Customer SEBELUMNYA kirim: \"" + t.slice(0, 250) + "\"",
+    "Bridge SUDAH kirim tombol: Goreng / Frozen.",
+    "SETELAH customer pilih, kamu WAJIB:",
+    "1. Parse ulang pesanan customer dari teks asli di atas.",
+    "2. HITUNG TOTALNYA dengan rinci: sebut per-item + harga satuan.",
+    "3. Hitung juga add-on (matcha, thermal, dll).",
+    "4. JANGAN suruh cek katalog — customer sudah sebut item spesifik.",
+  ].join("\n"));
+  return true;
+}
+
+
+
+// === MISSING-FORM CLARIFICATION: re-parse order after customer clarifies form ===
+const MISSING_FORM_CLARIFY_RE = /\b(?:goreng|frozen|matang|mentah|siap\s*makan)\b/i;
+
+async function tryHandleMissingFormClarification(from, userText) {
+  var _md = loadSbsrDraft(from) || {};
+  if (!_md.pending_missing_form_text) return false;
+  var t = String(userText || "").trim();
+  if (!MISSING_FORM_CLARIFY_RE.test(t)) return false;
+  // Customer clarified form! Build explicit LLM prompt to calculate total
+  var _orig = _md.pending_missing_form_text;
+  var _formText = t.replace(/\(.*?\)/g, "").trim();  // strip "(siap makan)" etc
+  // Clean up pending state
+  var _clean = { ..._md };
+  delete _clean.pending_missing_form_text;
+  delete _clean.pending_missing_form_at;
+  saveSbsrDraft(from, _clean);
+  log("sbsr-missing-form", "clarification from=" + from + " form=" + _formText + " — calc via LLM");
+  // Try free-text parse first (may work for some formats)
+  if (typeof tryHandleFreeTextOrder === "function") {
+    var _parsed = await tryHandleFreeTextOrder(from, _orig);
+    if (_parsed) {
+      log("sbsr-missing-form", "reparse_ok from=" + from);
+      return true;
+    }
+    log("sbsr-missing-form", "reparse_failed — calc_via_LLM from=" + from);
+  }
+  // Build explicit LLM prompt with catalog prices
+  // Inject live catalog so LLM can compute exact prices
+  var _catalogText = "";
+  try { _catalogText = formatCatalogForLLM ? formatCatalogForLLM() : ""; } catch(_ce) {}
+  var _isFrozen = /frozen/i.test(_formText);
+  var _calcPrompt = [
+    "Kamu adalah Mintu, CS Sentuh Rasa. Customer tanya total harga pesanan.",
+    "",
+    "PESANAN CUSTOMER:",
+    "\"" + _orig.slice(0, 300) + "\"",
+    "",
+    "FORM: " + _formText + (_isFrozen ? " (FROZEN, harga frozen)" : " (GORENG, harga goreng)"),
+    "",
+    "TUGAS KAMU:",
+    "1. Parse item2 dari pesanan di atas. Customer udah klarifikasi form = " + _formText + ".",
+    "2. Cocokkan setiap item ke katalog di bawah. KALAU TIDAK ADA YANG COCOK, pakai varian terdekat.",
+    "3. UNTUK RISOL: kalau customer sebut varian spesifik (ayam sayur, mercon, rougut, dll) — itu ADA di katalog.",
+    "   - 'ayam mercon' = Ayam Mercon Chili Oil",
+    "   - 'rougut' = Ragout Creamy",
+    "   - 'smoked beef' = Smoked Beef Mayo",
+    "4. Kalau customer gak sebut pack size, TANYA: 3pcs, 6pcs, atau 12pcs?",
+    "5. Hitung juga add-on yang disebut (matcha, thermal bag, chili sauce, ice gel, mika, greeting card, dll).",
+    "6. Kirim RINCIAN TOTAL: per-item × harga satuan = subtotal. Lalu TOTAL SEMUA.",
+    "",
+    "JANGAN:",
+    "- JANGAN bilang 'tidak ada di daftar' — semua varian ADA, cari yang terdekat.",
+    "- JANGAN suruh cek katalog WA — customer sudah sebut item spesifik.",
+    "- JANGAN tanya ulang varian — customer sudah sebut. HANYA tanya pack size kalau belum disebut.",
+    "- JANGAN tanya frozen/goreng lagi — customer sudah klarifikasi " + _formText + ".",
+    "",
+    "FORMAT JAWABAN:",
+    "Siap Kak! Untuk pesanan " + _formText + ":",
+    "• [Nama item] × [qty] = Rp[subtotal]",
+    "...",
+    "",
+    "*Subtotal: Rp[TOTAL]* (belum ongkir)",
+    "Mau tambah atau langsung lanjut, Kak? 🤍",
+    "",
+    "===== KATALOG HARGA =====",
+    _catalogText,
+    "===== END KATALOG =====",
+  ].join("\n");
+  try {
+    var _llmReply = await sendToOpenClaw("calc-" + Date.now() + "-" + from, _calcPrompt);
+    if (_llmReply && String(_llmReply).trim()) {
+      await sendWhatsAppMessage(from, String(_llmReply).trim());
+      log("sbsr-missing-form", "calc_ok from=" + from);
+      return true;
+    }
+  } catch (_e) {
+    log("sbsr-missing-form", "calc_llm_err: " + (_e && _e.message));
+  }
+  // Ultimate fallback: set pending context for OOC handler
+  setPendingBridgeContext(from, [
+    "Customer klarifikasi form: \"" + _formText + "\"",
+    "Original order: \"" + _orig.slice(0, 250) + "\"",
+    "HITUNG TOTALNYA SEKARANG. Sebut per-item + harga + subtotal.",
+  ].join("\n"));
+  return false;
+}
+
+
 async function tryHandleFreeTextOrder(from, userText) {
   if (!userText) return false;
   if (!freeTextParseEnabled(from)) return false;
@@ -7489,7 +8153,6 @@ async function tryHandleAdminCmd(from, userText) {
   });
 }
 
-
 const ADMIN_HANDOFF_RE = /\b(kir(?:im)?|teruskan|tolong|hubungkan|connect|forward|escal|escalate)\b.*\b(admin|finance|kakak\s+admin|owner|manager|kitchen)\b|\b(ke|kepada|ke\s+pak|ke\s+kak)\s+admin\b/i;
 // =====================================================
 // Kitchen READY ack from the kitchen/admin phone.
@@ -7733,6 +8396,15 @@ async function tryHandleOutOfContextHandoff(from, userText) {
           var _oocReply = String(_oocR).trim();
           if (_oocReply.length > 5 && !/^(boleh|tolong|mohon|silahkan|kirim)\s+(kirim|isi|infokan|masukkan|share)\s*(alamat|pin|lokasi|nama)/i.test(_oocReply)) {
             await sendWhatsAppMessage(from, _oocReply);
+            // Auto-notify admin if LLM replied with admin handoff in smart_ooc
+            if (/(?:teruskan|sambungkan|hubungkan|forward|eskalasi|admin\s+kami)\s*(?:ke|sama|dengan)?\s*admin|admin\s*(?:akan|bakal|nanti|segera|lagi)\s*(?:bantu|cek|tinjau|review|proses|tindaklanjut)/i.test(_oocReply)) {
+              const _ahDraft2 = loadSbsrDraft(from) || {};
+              await notifySbsrAdminsText(
+                ["🚨 *LLM ADMIN HANDOFF (smart_ooc)*", "Customer: " + (_ahDraft2.customer_name || "?") + " (+" + from + ")", "State: " + state, "LLM reply: \"" + _oocReply.slice(0, 200) + "\""].join("\n"),
+                "sbsr-llm-admin-handoff"
+              );
+              log("sbsr-ooc", "admin_handoff_detected_in_smart_ooc");
+            }
             log('sbsr-ooc', 'smart_ooc state=' + state + ' reply=' + _oocReply.slice(0, 100));
             _oocOk = true;
           }
@@ -8081,6 +8753,54 @@ async function tryHandleInvoiceOk(from, userText) {
 }
 
 
+// === DELIVERY CONFIRMATION HANDLER ===
+async function tryHandleDeliveryConfirm(from, userText) {
+  const draft = loadSbsrDraft(from) || {};
+  if (!draft.delivery_confirmation_sent_at) return false;
+  if (draft.delivery_confirmed_at || draft.delivery_issue_reported_at) return false;
+
+  const text = String(userText || "").trim().toLowerCase();
+  const customerName = draft.customer_name || "Kak";
+
+  // Confirmation patterns
+  const confirmRe = /^(sudah|ya|udah|sdh|ok|oke|yes|y|sampai|nyampe|terima|diterima|aman|selesai|mantap)\b/i;
+  // Issue patterns
+  const issueRe = /(belum|kendala|rusak|kurang|salah|nggak sampai|ga sampai|gak nyampe|ngga nyampe|ada masalah|error|hilang|bocor|tumpah)/i;
+
+  if (confirmRe.test(text)) {
+    const reply = "Terima kasih banyak Kak " + customerName + "! \uD83D\uDE4F\uD83E\uDD0D\n\n"
+      + "Seneng denger pesanannya udah sampai dengan aman. Selamat menikmati ya Kak \uD83C\uDF89\n\n"
+      + "Ada lagi yang bisa Mintu bantu? \uD83D\uDE0A";
+
+    await sendWhatsAppMessage(from, reply);
+    saveSbsrDraft(from, { ...draft, delivery_confirmed_at: new Date().toISOString() });
+    log("delivery-confirm", "confirmed by " + from + " for order");
+    return true;
+  }
+
+  if (issueRe.test(text)) {
+    const reply = "Maaf banget Kak " + customerName + " kalau ada kendala \uD83D\uDE4F\n\n"
+      + "Mintu langsung kabarin admin ya, nanti dibantu secepatnya \uD83E\uDD0D\n\n"
+      + "Atau Kakak bisa langsung hubungi admin kami:\n"
+      + "\uD83D\uDCDE 0811-321-166";
+
+    await sendWhatsAppMessage(from, reply);
+
+    // Alert admin
+    const adminMsg = "[DELIVERY ISSUE] " + from + " (" + customerName + ") lapor kendala: \"" + String(userText || "").slice(0, 200) + "\"";
+    const adminPhones = ADMIN_PHONES.filter(Boolean);
+    for (const phone of adminPhones) {
+      sendWhatsAppMessage(phone, adminMsg).catch(() => {});
+    }
+
+    saveSbsrDraft(from, { ...draft, delivery_issue_reported_at: new Date().toISOString(), delivery_issue_text: userText });
+    log("delivery-confirm", "issue reported by " + from + ": " + (userText || "").slice(0, 120));
+    return true;
+  }
+
+  return false;
+}
+
 // === LLM-FIRST ROUTER ===
 const LLM_FIRST_STATES_INIT = new Set([
   null, 'none', 'initial', '', 'main_menu', 'awaiting_main_menu_choice',
@@ -8269,6 +8989,23 @@ async function handleMessage(msg, contacts) {
           _merged.forEach(it => draftItems.push(it));
           subtotal = draftItems.reduce((s, it) => s + ((Number(it.unit_price) || 0) * (Number(it.qty) || 0)), 0);
         }
+        // --- Availability check: reject order if any item is out of stock ---
+        const unavailableItems = [];
+        for (const it of draftItems) {
+          const avail = lookupProductAvailability(it.sku);
+          if (avail && avail !== "in stock" && avail !== "available for order") {
+            unavailableItems.push(it.name);
+          }
+        }
+        if (unavailableItems.length > 0) {
+          const itemList = unavailableItems.map(n => "\u2022 " + n).join("\n");
+          await sendWhatsAppMessage(from,
+            "Maaf Kak, produk berikut sedang tidak tersedia saat ini:\n\n" + itemList +
+            "\n\nSilakan pilih menu lain dari katalog ya \uD83D\uDE4F"
+          );
+          sendWhatsAppCatalog(from).catch(function(){});
+          return;
+        }
         const priorTerminal = !!existing.invoice_sent_at
           || ["awaiting_invoice_confirm","awaiting_proof","pending_finance","approved","BOOKED","booked","delivered","cancelled"].includes(existing.state);
         // Decide whether to wipe prior state for the new catalog order.
@@ -8433,7 +9170,32 @@ async function handleMessage(msg, contacts) {
               log("sbsr-addon", "offer_after_product_selection");
             }
           } else {
-            await sendSbsrUseCasePrompt(from, latestDraft);
+            // No use_case and no inferred mode — check if already waiting
+            var _prevState = String(existing.state || "").trim().toLowerCase();
+            if (_prevState === "awaiting_usecase") {
+              // Customer already saw use-case prompt, now picked from catalog.
+              // Skip use-case: auto-set to "makan-langsung" and go straight to addon
+              var _autoUseCase = "makan-langsung";
+              var _hasFrozenInCart = Array.isArray(latestDraft.items) && latestDraft.items.some(function(it) { return it && it.form === "frozen"; });
+              var _nextDraft = { ...latestDraft, use_case: _autoUseCase, use_case_source: "auto_from_catalog", use_case_set_at: new Date().toISOString() };
+              saveSbsrDraft(from, _nextDraft);
+              log("sbsr-catalog-order", "no_use_case_but_awaiting — auto use_case=" + _autoUseCase + " → addon");
+              await sendSbsrAddonOffer(from, _nextDraft);
+              log("sbsr-addon", "offer_after_auto_use_case");
+            } else {
+              // Fresh start — send confirmation + use-case prompt
+              var _itemSummary = (latestDraft.items || []).map(function(it) {
+                return (it.name || "item") + " x" + (it.qty || 1);
+              }).join(", ");
+              await sendWhatsAppMessage(from, "Mintu catat ya Kak: " + _itemSummary + " \u{1f90d}\n\n" +
+                "Untuk kebutuhan apa nih pesanannya?\n" +
+                "1. Makan langsung\n2. Stock frozen\n3. Meeting/acara\n4. Gift/hampers");
+              log("sbsr-catalog-order", "no_use_case_fresh — sent confirmation + use-case");
+            }
+            log("sbsr-order-flow", "waiting_usecase");
+            var _coCtx = "Customer baru pilih dari katalog. " +
+              "Kamu SUDAH tanya use-case (1-4). TUNGGU customer pilih. JANGAN tanya lagi.";
+            setPendingBridgeContext(from, _coCtx);
           }
         }
         sendReaction(from, messageId, "").catch(() => {});
@@ -8472,8 +9234,13 @@ async function handleMessage(msg, contacts) {
     if (!userText) return;
     log("msg", contactName + " (" + from + "): " + userText);
     safeLog(admin.logIncoming, from, userText || ("[" + msg.type + "]"), contactName);
-    sendTypingIndicator(from, messageId).catch(() => {});
+    // Admin pause: silent drop before typing + interceptors.
+    // Admin panel resume → isPaused=false → bot responds again.
+    if (admin && typeof admin.isPaused === "function" && admin.isPaused(from)) {
+      return;
+    }
 
+    sendTypingIndicator(from, messageId).catch(() => {});
     // Admin/Finance/Kitchen number lockdown (per user request 2026-05-05).
     // +6285741844938 (in SBSR_FINANCE_PHONES) is admin-only — never a customer.
     // Run admin-cmd intercept (APPROVE/REJECT/slash). Anything else from this number
@@ -8500,7 +9267,6 @@ async function handleMessage(msg, contacts) {
       // Not an admin command - let through to customer flow
     }
 
-
     // Bridge-level handlers (run BEFORE LLM to avoid hallucinated tool calls)
     // Greeting/menu intercept must stay first so simple salutations never fall
     // through to OpenClaw, Qdrant-era retrieval layers, OCR, or approval flows.
@@ -8519,7 +9285,7 @@ async function handleMessage(msg, contacts) {
         sendReaction(from, messageId, "").catch(() => {});
         return;
       }
-      if (isCancelIntent(userText)) {
+      if (!_activeCheckoutForMenu && isCancelIntent(userText)) {
         const _d = loadSbsrDraft(from) || {};
         const _st = String(_d.state || "").trim().toLowerCase();
         if (isCheckoutActiveState(_st)) {
@@ -8536,7 +9302,11 @@ async function handleMessage(msg, contacts) {
           return;
         }
       }
-      if (isMenuIntent(userText)) {
+      // LLM-FIRST GUARD: during active checkout, let LLM handle ALL conversation
+      // Bridge only handles structured inputs (interactive replies, location, address parse)
+      if (_activeCheckoutForMenu) {
+        log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
+      } else if (isMenuIntent(userText)) {
         log("sbsr-menu-interrupt", "detected");
         if (isProtectedPaymentFlowDraft(_preDraftForMenu)) {
           log("sbsr-menu-interrupt", "protected_payment_flow=true");
@@ -8570,7 +9340,7 @@ async function handleMessage(msg, contacts) {
         log("sbsr-session", "greeting_reset_clean_start");
         log("sbsr-router", "bypass_checkout_state menu_interrupt=true");
         try {
-          await sendWhatsAppMessage(from, "Siap Kak, ini menu Sentuh Rasa — bisa langsung pilih varian + qty dari katalog ya 🤍");
+          await sendWhatsAppMessage(from, formatSbsrFullMenuText());
           await sendWhatsAppCatalog(from);
           const d = loadSbsrDraft(from) || { phone: from };
           await sendSbsrUseCasePrompt(from, d.phone ? d : { phone: from });
@@ -8584,7 +9354,7 @@ async function handleMessage(msg, contacts) {
           return;
         }
       }
-      if (isRestartIntent(userText, _preStateForMenu)) {
+      if (!_activeCheckoutForMenu && isRestartIntent(userText, _preStateForMenu)) {
         if (SBSR_RESTART_PROTECTED_STATES.has(_preStateForMenu)) {
           const _fallback = getSbsrDeterministicMissingStateMessage(from, _preDraftForMenu);
           try { await sendWhatsAppMessage(from, _fallback); } catch (_) {}
@@ -8645,12 +9415,63 @@ async function handleMessage(msg, contacts) {
         log("sbsr-router", "skipped_root_menu_active_checkout");
       }
     }
+    // === DELIVERY CONFIRMATION INTERCEPT ===
+    if (await tryHandleDeliveryConfirm(from, userText)) {
+      log("intercept", "tryHandleDeliveryConfirm " + from);
+      sendReaction(from, messageId, "").catch(() => {});
+      return;
+    }
+    // INTERACTIVE BUTTON HANDLER: "ya_lanjut" → transition to delivery method
+    if (msg.type === "interactive" && msg.interactive && msg.interactive.button_reply) {
+      const _btnId = msg.interactive.button_reply.id;
+      if (_btnId === "ya_lanjut") {
+        const _bd = loadSbsrDraft(from) || {};
+        const _bItems = (Array.isArray(_bd.items) && _bd.items.length > 0) || (_bd.cart && Array.isArray(_bd.cart.items) && _bd.cart.items.length > 0);
+        if (_bItems) {
+          saveSbsrDraft(from, { ..._bd, state: "awaiting_delivery_method" });
+          await sendSbsrDeliveryMethodButtons(from);
+          log("sbsr-interactive", "ya_lanjut -> delivery_method");
+          sendReaction(from, messageId, "").catch(() => {});
+          return;
+        }
+        // No items in draft — try pending_order_summary from LLM reply
+        const _summary = _bd.pending_order_summary || '';
+        if (_summary) {
+          // Parse price from summary: "totalnya Rp110.000" or "Rp110.000 ya"
+          const _priceM = _summary.match(/Rp\s*([\d.]+)/);
+          const _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
+          // Detect variant: "Mix X pcs" → determine pack_size
+          const _mixM = _summary.match(/Mix\s+(\d+)\s*pcs/i);
+          const _pack = _mixM ? parseInt(_mixM[1], 10) : 12;
+          // Determine form: "Frozen" → frozen, else goreng
+          const _form = /frozen/i.test(_summary) ? 'frozen' : 'goreng';
+          const _name = 'Risol ' + (_form === 'frozen' ? 'Frozen' : 'Goreng') + ' — Mix ' + _pack + 'pcs';
+          saveSbsrDraft(from, {
+            ..._bd,
+            items: [{ name: _name, qty: 1, pack_size: _pack, unit_price: _price, form: _form }],
+            subtotal: _price,
+            pending_order_summary: null,
+            state: 'awaiting_delivery_method',
+          });
+          log('sbsr-interactive', 'ya_lanjut -> created draft from summary price=' + _price + ' pack=' + _pack);
+          await sendSbsrDeliveryMethodButtons(from);
+          sendReaction(from, messageId, '').catch(() => {});
+          return;
+        }
+        // No summary either — fall through to LLM
+        log('sbsr-interactive', 'ya_lanjut -> no_items_no_summary, falling through');
+      }
+      if (_btnId === "tidak") {
+        log("sbsr-interactive", "tidak button — letting LLM handle");
+        // Fall through to LLM
+      }
+    }
     // ORDER: IG approval first — pending-state context makes intent unambiguous, and the LLM
     // hallucinates "NO" if it gets the message instead.
     try { sniffMapsLinkFromCustomer(from, userText); } catch (e) { log("sbsr-maps-sniff", "err: " + e.message); }
     try {
       const _routerDraft = loadSbsrDraft(from) || {};
-      const _routerState = sbsrRouterStateLabel(_routerDraft);
+      let _routerState = sbsrRouterStateLabel(_routerDraft);
       const _trimText = String(userText || "").trim();
       sbsrRouterLogState(_routerState);
 
@@ -8664,7 +9485,19 @@ async function handleMessage(msg, contacts) {
           || /^(?:saya|aku|gue|gw)\s+(?:ingin|mau|butuh|tanya|liat|lihat|cek|tahu)\b/i.test(_trimText)
           || /\b(?:total|semua|list|daftar|rincian|detail|isi\s+pesanan|pesanan\s+saya)\b/i.test(_trimText);
         if (_qi_isQuestion) {
-          log("sbsr-router", "global_question_intercept state=" + _routerState + " text=" + _trimText.slice(0, 60));
+                    log("sbsr-router", "global_question_intercept state=" + _routerState + " text=" + _trimText.slice(0, 60));
+          // === MISSING-FORM GUARD: check before routing to LLM ===
+          if (await tryHandleMissingFormInquiry(from, _trimText)) {
+            log("sbsr-router", "global_question_missing_form state=" + _routerState);
+            sendReaction(from, messageId, "").catch(() => {});
+            return;
+          }
+          if (await tryHandleMissingFormClarification(from, _trimText)) {
+            log("sbsr-router", "global_question_missing_form_clarification state=" + _routerState);
+            sendReaction(from, messageId, "").catch(() => {});
+            return;
+          }
+          // === END MISSING-FORM GUARD ===
           if (await tryHandleOocDuringCheckout(from, _trimText, _routerDraft, _routerState)) {
             log("sbsr-router", "global_question_handled state=" + _routerState);
             sendReaction(from, messageId, "").catch(() => {});
@@ -8674,6 +9507,58 @@ async function handleMessage(msg, contacts) {
         }
       }
       // === END GLOBAL QUESTION INTERCEPTOR ===
+
+      // === LLM-FIRST SOPIR: LLM drives ALL checkout conversation ===
+      // Deterministic rails become fallback + critical validators only
+
+      // GLOBAL LANJUT INTENT: customer accepts "mau lanjut pesan?" -> transition to next step
+      const _acceptLanjut = /^(?:ya|iya|ok|oke|lanjut|siap|deal|boleh|mau|yes|yuk|gas|go)(?:\s+(?:lanjut|pesan|order|aja|deh|dong|kak|ya))*$/i.test(_trimText);
+      const _hasItems = (_routerDraft && Array.isArray(_routerDraft.items) && _routerDraft.items.length > 0) || (_routerDraft && _routerDraft.cart && Array.isArray(_routerDraft.cart.items) && _routerDraft.cart.items.length > 0);
+      const _needsDelivery = !_routerDraft.delivery_mode;
+      if (_acceptLanjut && _needsDelivery) {
+        saveSbsrDraft(from, { ..._routerDraft, state: "awaiting_delivery_method" });
+        await sendSbsrDeliveryMethodButtons(from);
+        log("sbsr-lanjut", "accepted -> delivery_method");
+        sbsrRouterLogRail("lanjut-accept");
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
+      }
+
+      if (isCheckoutActiveState(_routerState) && _trimText.length >= 2) {
+        // Skip states that should ALWAYS be deterministic (no LLM needed)
+        const _skipStates = ["awaiting_name", "awaiting_address", "awaiting_pin_confirm", "awaiting_address_pin_confirm"];
+        const _isDeterministicOnly = _skipStates.includes(_routerState);
+        // Skip structured single-token inputs that deterministic should handle
+        const _structuredInput = /^(?:1|2|3|4|ya|iya|tidak|gak|nggak|ok|oke|lanjut|sudah|siap|deal|yes|no|batal|cancel|reset|delivery|pickup)$/i.test(_trimText);
+        // Skip maps URLs (deterministic pin handler)
+        const _isMapsUrl = /^https?:\/\/.*(?:google\.com\/maps|maps\.google|goo\.gl\/maps|maps\.app\.goo\.gl)/i.test(_trimText);
+        // Skip interactive list replies (deterministic variant selection)
+        const _isInteractiveReply = _trimText.length <= 3 && /^\d+$/.test(_trimText) && _routerState === "awaiting_product_selection";
+      // === ADD-MORE DETECTION: detect "tambah"/"nambah" in any checkout state ===
+      if (await tryHandleGlobalAddMore(from, _trimText)) {
+        sbsrRouterLogRail("llm-sopir-add-more");
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
+      }
+      // === END ADD-MORE DETECTION ===
+        if (!_structuredInput && !_isMapsUrl && !_isInteractiveReply && !_isDeterministicOnly) {
+          // === MISSING-FORM CLARIFICATION: re-parse after form clarified ===
+          if (await tryHandleMissingFormClarification(from, _trimText)) {
+            sbsrRouterLogRail("llm-sopir-missing-form-clarification");
+            sendReaction(from, messageId, "").catch(() => {});
+            return;
+          }
+          // === END MISSING-FORM CLARIFICATION ===
+          const _sopirHandled = await tryHandleOocDuringCheckout(from, _trimText, _routerDraft, _routerState);
+          if (_sopirHandled) {
+            sbsrRouterLogRail("llm-sopir");
+            sendReaction(from, messageId, "").catch(() => {});
+            return;
+          }
+          log("sbsr-llm-sopir", "llm_failed state=" + _routerState + " — fallthrough to deterministic rails");
+        }
+      }
+      // === END LLM-FIRST SOPIR ===
 
       // PRIORITY MATRIX: state-locked rails first to prevent cross-rail leakage.
       if (_routerState === "awaiting_question") {
@@ -8704,8 +9589,15 @@ async function handleMessage(msg, contacts) {
           return;
         }
         sbsrRouterLogSkipped("awaiting_usecase");
+        // Re-check: tryHandleUseCaseRouter may have transitioned state to product_selection
+        var _newState = sbsrRouterStateLabel(loadSbsrDraft(from) || {});
+        if (_newState === "awaiting_product_selection") {
+          _routerState = "awaiting_product_selection";
+          log("sbsr-router", "state_reassigned_to_awaiting_product_selection");
+        }
         if (/^\s*[1-4](?:[.)\s].*)?\s*$/i.test(_trimText)) {
           await sendWhatsAppMessage(from, buildSbsrUseCasePromptText());
+          sendWhatsAppCatalog(from).catch(function(){});
           sbsrRouterLogRail("awaiting_usecase-reminder");
           sendReaction(from, messageId, "").catch(() => {});
           return;
@@ -8751,6 +9643,20 @@ async function handleMessage(msg, contacts) {
           return;
         }
         sbsrRouterLogSkipped("awaiting_delivery_method");
+        // Deterministic add-more intercept: "tambah lagi" / "mau nambah" reopen catalog
+        const _DM_ADD_MORE_RE = /^(?:mau\s+tambah\s+lagi|tambah\s+lagi|mau\s+tambah|mau\s+nambah|nambah\s+lagi|tambah\s+dulu|tambah\s+aja|nambah|add\s+more|tambahin)/i;
+        if (_DM_ADD_MORE_RE.test(_trimText)) {
+          const _dmDraft = loadSbsrDraft(from) || {};
+          saveSbsrDraft(from, { ..._dmDraft, add_more_mode: true, state: "awaiting_product_selection" });
+          await sendWhatsAppMessage(from, "Siap Kak, Mintu buka menu lagi ya. Pesanan yang sebelumnya tetap Mintu simpan, nanti totalnya Mintu gabungkan \ud83e\udd0d");
+          await sendWhatsAppCatalog(from);
+          log("sbsr-add-more", "detected from awaiting_delivery_method");
+          log("sbsr-add-more", "preserving_existing_cart count=" + ((Array.isArray(_dmDraft.items) ? _dmDraft.items.length : 0)));
+          log("sbsr-add-more", "catalog_sent");
+          sbsrRouterLogRail("awaiting_delivery_method-add_more");
+          sendReaction(from, messageId, "").catch(() => {});
+          return;
+        }
         // Fall through to LLM for natural language (e.g. "tambah 2 chili sauce")
         log("sbsr-delivery-method", "fallthrough_to_global for " + from);
         // Direct LLM callback for addon requests
@@ -8761,10 +9667,11 @@ async function handleMessage(msg, contacts) {
             const _dmPrompt = [
               "[ATURAN PENTING]",
               "- Kamu Mintu, CS Sentuh Rasa (Risoles Otentik)",
+              "- SETIAP customer minta/sebut TAMBAH barang, SELALU sebutkan HARGA dari katalog.",
               "- Jawab BAHASA INDONESIA natural, ramah, INFORMATIF",
               "- Customer sedang di tahap MILIH PENGIRIMAN (belum pilih delivery/pickup)",
               "- Jika customer minta TAMBAH barang: konfirmasi saja secara natural",
-              '- Setelah jawab, arahkan balik: pilih delivery (1) atau pickup (2)',
+              '- Jawab natural. Sistem yang akan menampilkan pilihan delivery/pickup.',
               "- JANGAN minta alamat/pin/nama/pembayaran",
               "",
               "[KATALOG PRODUK]",
@@ -8827,6 +9734,16 @@ async function handleMessage(msg, contacts) {
           return;
         }
 
+        if (await tryHandleMissingFormInquiry(from, userText)) {
+          sbsrRouterLogRail("product-missing-form-inquiry");
+          sendReaction(from, messageId, "").catch(() => {});
+          return;
+        }
+        if (await tryHandleMissingFormClarification(from, userText)) {
+          sbsrRouterLogRail("product-missing-form-clarification");
+          sendReaction(from, messageId, "").catch(() => {});
+          return;
+        }
         if (await tryHandleFreeTextOrder(from, userText)) {
           sbsrRouterLogRail("product-free-text-selection");
           sendReaction(from, messageId, "").catch(() => {});
@@ -8942,6 +9859,18 @@ async function handleMessage(msg, contacts) {
         log("intercept", "tryHandleCatalogRequest " + from);
         sendReaction(from, messageId, "").catch(() => {});
         log("sbsr-catalog-intercept", "Handled catalog request, skipping LLM");
+        return;
+      }
+      if (await tryHandleMissingFormInquiry(from, userText)) {
+        log("intercept", "tryHandleMissingFormInquiry " + from);
+        sendReaction(from, messageId, "").catch(() => {});
+        log("sbsr-missing-form", "Handled missing-form inquiry, skipping LLM");
+        return;
+      }
+      if (await tryHandleMissingFormClarification(from, userText)) {
+        log("intercept", "tryHandleMissingFormClarification " + from);
+        sendReaction(from, messageId, "").catch(() => {});
+        log("sbsr-missing-form", "Handled missing-form clarification, re-parsed");
         return;
       }
       if (await tryHandleFreeTextOrder(from, userText)) {
@@ -9106,6 +10035,27 @@ async function handleMessage(msg, contacts) {
 
     const _postDraft = loadSbsrDraft(from) || {};
     const _postState = String(_postDraft.state || "").trim().toLowerCase();
+function getStateNudgeText(state) {
+  var nudges = {
+    "awaiting_usecase": "Silakan pilih kebutuhan: 1) makan langsung, 2) stock frozen, 3) meeting/acara, 4) gift/hampers",
+    "awaiting_product_selection": "Silakan pilih varian + jumlah dari katalog ya Kak \u{1f90d}",
+    "awaiting_addon_reply": "Kalau sudah cukup, balas LANJUT ya Kak",
+    "awaiting_delivery_method": "Pilih pengiriman: 1) Delivery atau 2) Pickup",
+    "awaiting_name": "Boleh info nama penerima ya Kak",
+    "awaiting_address": "Kirim alamat lengkap + titik Maps ya Kak \u{1f4cd}",
+    "awaiting_location": "Share lokasi WhatsApp atau link Google Maps ya Kak",
+    "awaiting_address_pin_confirm": "Konfirmasi alamat & pin-nya ya Kak",
+    "awaiting_order_confirm": "Balas OK/YA kalau sudah sesuai ya Kak",
+    "awaiting_invoice_confirm": "Balas OK/YA untuk lanjut ke pembayaran ya Kak",
+    "awaiting_proof": "Upload bukti pembayaran ya Kak \u{1f4f8}",
+    "awaiting_pin_confirm": "Konfirmasi pin lokasi ya Kak",
+    "awaiting_meeting_package_confirm": "Konfirmasi paket meeting ya Kak",
+    "awaiting_courier_choice": "Pilih kurir: 1 atau 2 ya Kak",
+    "awaiting_location_retry": "Coba kirim ulang lokasi ya Kak"
+  };
+  return nudges[state] || "Silakan lanjutkan proses pemesanan ya Kak \u{1f90d}";
+}
+
     const _checkoutLockStates = new Set([
       "awaiting_usecase",
       "awaiting_meeting_package_confirm",
@@ -9122,9 +10072,7 @@ async function handleMessage(msg, contacts) {
       "awaiting_location_retry",
     ]);
     if (_checkoutLockStates.has(_postState)) {
-      // === SMART OOC: Instead of blocking LLM, try with Qdrant context ===
-      // If user asks OOC, Gemini answers naturally with product knowledge.
-      // If response is checkout-relevant, fallback to deterministic message.
+      // === SMART OOC: LLM-FIRST -- jawab dulu, baru nudge balik ke state ===
       var _oocHandled2 = false;
       // ADDRESS GUARD: if awaiting_address and text looks like address, skip OOC
       if (_postState === "awaiting_address" && userText.length >= 10 && !/\?/.test(userText)) {
@@ -9133,19 +10081,39 @@ async function handleMessage(msg, contacts) {
       } else {
       try {
         var _oocCtx = await sbsrRetrieveMemoryContext(from, userText);
+        var _stateNudge = getSbsrDeterministicMissingStateMessage(from, loadSbsrDraft(from) || {}) || "lanjut ke proses pemesanan ya Kak \u{1f90d}";
         var _oocGuard = [
-          '[ATURAN PENTING]',
-          '- Kamu Mintu, CS Sentuh Rasa (Risoles Otentik)',
-          '- Jawab BAHASA INDONESIA natural, ramah, INFORMATIF',
-          '- Kalo ditanya harga/produk/varian: jawab dari pengetahuanmu',
-          '- Kalo ditanya lokasi: Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jakarta Timur',
-          "- JANGAN ubah status pesanan / minta alamat/pin/nama/pembayaran (kecuali customer minta TAMBAH barang)",
-          '- JANGAN pake NO_REPLY atau bahasa internal sistem',
-          '- Setelah jawab pertanyaan, katakan silakan lanjut isi data',
+          '[ATURAN PENTING -- KAMU SUPIR, BRIDGE TUJUAN]',
+          '- Kamu Mintu, CS Sentuh Rasa (Risoles Otentik) -- ramah, helpful.',
+          '- PRIORITAS 1: JAWAB dulu pertanyaan customer dengan lengkap & natural.',
+          '- PRIORITAS 2: Setelah menjawab, ingatkan customer: \"' + _stateNudge.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '\"',
+          '- SETIAP sebut/minta/tambah produk -> SELALU sebutkan HARGA dari katalog.',
+          '- Customer tanya FAQ (halal, lokasi, kurir, dll) -> jawab dari FAQ.',
+          '- JANGAN bilang \"sistem yang akan proses\" atau \"nanti dikirim otomatis\".',
+          '- Kamu yang handle percakapan personal, bukan sistem.',
+          '- JANGAN pake NO_REPLY atau bahasa internal.',
           '',
-          "- Jika customer minta TAMBAH barang: konfirmasi saja secara natural dan arahkan balik ke alur",
-          'STATUS SEKARANG: customer sedang di tahap ' + _postState.replace(/_/g, ' ') + '.',
-          'PENTING: customer sedang order. Jawab pertanyaannya, lalu arahkan balik ke alur.',
+          // Inject cart info so LLM can answer total/harga questions
+          (function(){
+            var _cd = loadSbsrDraft(from) || {};
+            var _items = Array.isArray(_cd.items) ? _cd.items : [];
+            if (_items.length === 0) return '';
+            var _lines = ['', '[ISI CART SAAT INI]'];
+            var _st = 0;
+            for (var _ii = 0; _ii < _items.length; _ii++) {
+              var _it = _items[_ii];
+              var _up = Number(_it.unit_price) || 0;
+              var _qt = Number(_it.qty) || 1;
+              var _nm = _it.name || 'Item';
+              _lines.push('- ' + _nm + ': ' + _qt + ' x Rp' + _up.toLocaleString('id-ID') + ' = Rp' + (_up * _qt).toLocaleString('id-ID'));
+              _st += _up * _qt;
+            }
+            _lines.push('SUBTOTAL: Rp' + _st.toLocaleString('id-ID'));
+            _lines.push('ONGKIR: Rp' + (Number(_cd.ongkir) || 0).toLocaleString('id-ID'));
+            _lines.push('GRAND TOTAL: Rp' + (_st + (Number(_cd.ongkir) || 0)).toLocaleString('id-ID'));
+            _lines.push('(Jika customer tanya total/harga/rincian, JAWAB dengan data di atas. JANGAN bilang "nanti sistem yang hitung".)');
+            return _lines.join('\n');
+          })(),
           '',
           '[KATALOG PRODUK SENTUH RASA]',
           formatCatalogForLLM(),
@@ -9165,7 +10133,31 @@ async function handleMessage(msg, contacts) {
           var _oocReply2 = String(_oocR2).trim();
           if (_oocReply2.length > 5 && !/^(boleh|tolong|mohon|silahkan|kirim|share)\s+(kirim|isi|infokan|masukkan|share)\s*(alamat|pin|lokasi|nama)/i.test(_oocReply2)) {
             await sendWhatsAppMessage(from, _oocReply2);
+            // Auto-notify admin if LLM replied with admin handoff in smart_block_ooc
+            if (/(?:teruskan|sambungkan|hubungkan|forward|eskalasi|admin\s+kami)\s*(?:ke|sama|dengan)?\s*admin|admin\s*(?:akan|bakal|nanti|segera|lagi)\s*(?:bantu|cek|tinjau|review|proses|tindaklanjut)/i.test(_oocReply2)) {
+              const _ahDraft3 = loadSbsrDraft(from) || {};
+              await notifySbsrAdminsText(
+                ["🚨 *LLM ADMIN HANDOFF (smart_block)*", "Customer: " + (_ahDraft3.customer_name || "?") + " (+" + from + ")", "State: " + _postState, "LLM reply: \"" + _oocReply2.slice(0, 200) + "\""].join("\n"),
+                "sbsr-llm-admin-handoff"
+              );
+              log("sbsr-ooc", "admin_handoff_detected_in_smart_block_ooc");
+            }
             log('sbsr-ooc', 'smart_block_ooc state=' + _postState + ' reply=' + _oocReply2.slice(0, 100));
+            // Auto-send interactive buttons if LLM asks "mau lanjut?"
+            if (/mau\s+langsung\s+pesan|lanjut\s+ke\s+alamat|mau\s+lanjut\s+pesan/i.test(_oocReply2)) {
+              try {
+                await sendWhatsAppInteractiveButtons(from,
+                  "Pilih opsi di bawah ya Kak \u{1f90d}",
+                  [
+                    { type: "reply", reply: { id: "ya_lanjut", title: "Ya, lanjut pesan" } },
+                    { type: "reply", reply: { id: "tidak", title: "Tidak dulu" } }
+                  ]
+                );
+                log('sbsr-interactive', 'lanjut_buttons_sent');
+              } catch (_ibErr) {
+                log('sbsr-interactive', 'button_err: ' + (_ibErr && _ibErr.message));
+              }
+            }
             _oocHandled2 = true;
           }
         }
@@ -9571,9 +10563,114 @@ app.post("/webhook", (req, res) => {
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", gateway: gatewayReady, uptime: process.uptime(), queueLength: messageQueue.length, pendingChats: pendingChats.size, reconnectAttempt: reconnectAttempt });
+})
+// --- Biteship Webhook Handler (delivery status updates) ---
+app.post("/biteship-webhook", async (req, res) => {
+  res.status(200).json({ success: true });
+
+  try {
+    const { event, status, metadata, order_id, courier_waybill_id, courier_company } = req.body;
+    log("biteship-webhook", "received event=" + event + " status=" + status + " order_id=" + (order_id || "?") + " waybill=" + (courier_waybill_id || "?") + " courier=" + (courier_company || "?"));
+
+    if (event !== "order.status") return;
+    if (status !== "delivered") return;
+
+    let sbsrOrderId = metadata?.order_id || null;
+    let orderData = null;
+    const ordersPath = "/opt/sbsr/data/openclaw/.openclaw/workspace/orders.json";
+
+    if (fs.existsSync(ordersPath)) {
+      const orders = JSON.parse(fs.readFileSync(ordersPath, "utf8"));
+
+      if (sbsrOrderId && orders[sbsrOrderId]) {
+        orderData = orders[sbsrOrderId];
+        log("biteship-webhook", "found order by metadata.order_id=" + sbsrOrderId);
+      }
+
+      if (!orderData && order_id) {
+        for (const [id, data] of Object.entries(orders)) {
+          if (data.biteship_order_id === order_id) {
+            sbsrOrderId = id;
+            orderData = data;
+            log("biteship-webhook", "found order by biteship_order_id=" + order_id);
+            break;
+          }
+        }
+      }
+
+      if (!orderData && courier_waybill_id) {
+        for (const [id, data] of Object.entries(orders)) {
+          if (data.waybill_id === courier_waybill_id) {
+            sbsrOrderId = id;
+            orderData = data;
+            log("biteship-webhook", "found order by waybill_id=" + courier_waybill_id);
+            break;
+          }
+        }
+      }
+    }
+
+    if (!orderData) {
+      log("biteship-webhook", "order not found for " + (sbsrOrderId || order_id || courier_waybill_id || "?"));
+      return;
+    }
+
+    const customerName = orderData.customer_name || "Kak";
+    const customerPhone = orderData.phone;
+
+    if (!customerPhone) {
+      log("biteship-webhook", "no phone for order " + sbsrOrderId);
+      return;
+    }
+
+    const message = "Halo Kak " + customerName + ", mohon konfirmasi apakah pesanan dari Sentuh Rasa sudah diterima? 🤍\n\nmohon infokan jika ada kendala ya ka. Terima kasih sudah order hari ini.";
+
+    // Save delivery confirmation flag to draft for customer reply handling
+    try {
+      const _dr = loadSbsrDraft(customerPhone) || { phone: customerPhone };
+      saveSbsrDraft(customerPhone, { ..._dr, delivery_confirmation_sent_at: new Date().toISOString() });
+    } catch (_) {}
+    await sendWhatsAppMessage(customerPhone, message);
+    log("biteship-webhook", "delivery confirmation sent to " + customerPhone + " for order " + sbsrOrderId);
+  } catch (e) {
+    log("biteship-webhook", "Error: " + e.message);
+  }
 });
 
 // --- Admin inbox panel (mount before listen) ---
+
+// --- Admin: send image via WhatsApp (base64 JSON) — with preview URL ---
+app.post("/admin-send-image", express.json({ limit: "15mb" }), async (req, res) => {
+  log("admin-send-image", "REQUEST received, headers: " + Object.keys(req.headers).join(","));
+  try {
+    const { phone, image_base64, mime_type, caption } = req.body;
+    if (!phone) return res.status(400).json({ error: "missing phone" });
+    if (!image_base64) return res.status(400).json({ error: "missing image_base64" });
+    const buf = Buffer.from(image_base64, "base64");
+    const mime = mime_type || "image/jpeg";
+
+    // Save to receipts dir so it has a public URL (same as customer images)
+    const ext = mime.includes("png") ? ".png" : mime.includes("gif") ? ".gif" : ".jpg";
+    const filename = "ADMIN-IMG-" + Date.now() + ext;
+    var receiptPath = "/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads/" + filename;
+    try { if (!fs.existsSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads")) fs.mkdirSync("/docker/openclaw-sbsr/data/sentuhrasa-pdf/uploads", { recursive: true }); } catch(_) {}
+    fs.writeFileSync(receiptPath, buf);
+    var imageUrl = "https://production.biks.ai/receipts/" + filename;
+
+    // Upload to WhatsApp
+    var mediaId = await uploadMediaToWhatsApp(receiptPath, mime);
+    await sendWhatsAppImage(phone, mediaId, caption || "");
+
+    // Log with URL so admin.js can render preview
+    var logText = "[image: " + imageUrl + "]" + (caption ? " " + caption : "");
+    safeLog(admin.logOutgoing, phone, logText);
+    res.json({ ok: true, url: imageUrl });
+  } catch(e) {
+    log("admin-send-image", "Error: " + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 try { admin.mount(app, sendWhatsAppMessage, process.env.ADMIN_PASSWORD); }
 catch (e) { log("admin", "mount failed (non-fatal): " + e.message); }
 
@@ -9598,7 +10695,7 @@ function formatFaqForLLM() {
   faq.push("[RESELLER] Starter 4pk=47k. Medium 6pk=46k. Business 10pk=45k. Cafe: diskusi atasan.");
   faq.push("[PROMO] Boleh sebut promo aktif. Jangan janjikan promo lewat.");
   faq.push("[KOMPLAIN] Belum sampai: follow up. Rasa biasa: detail. Rasa basi: jam terima/coba/kondisi. Rusak: foto.");
-  faq.push("[REKOMENDASI] Makan langsung -> goreng 6/12. Stock frozen -> 1 pack/varian. Meeting -> 2 box 12 + minuman. Gift -> +thermal bag +greeting card.");
+  faq.push("[REKOMENDASI] Makan langsung -> goreng 6/12. Stock frozen -> 1 pack/varian. Meeting -> 2 box 12 + minuman. Gift -> +thermal +greeting card. Thermal: reguler 8k/max 3 pack, premium 30k/max 6 pack, ice gel 3k.");
   faq.push("ATURAN: Jawab dari FAQ. Alergi/refund: escalate. Promo lewat: jangan janji.");
   return faq.join("\\n");
 }
