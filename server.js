@@ -1122,8 +1122,14 @@ async function handleImageMessage(msg) {
   }
 }
 
-// --- Raw body ---
-app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+// --- Raw body (global parser, 1 MB limit) ---
+// Admin upload routes (/admin-send-image, /admin-send-document) are excluded here
+// so they can use their own route-level parsers with higher limits (15 MB / 110 MB).
+// Signature verification (rawBody) is only needed for Meta webhook — not admin uploads.
+app.use((req, res, next) => {
+  if (req.path === "/admin-send-image" || req.path === "/admin-send-document") return next();
+  express.json({ limit: "1mb", verify: (req, _res, buf) => { req.rawBody = buf; } })(req, res, next);
+});
 
 // --- Signature verification ---
 function verifySignature(req) {
