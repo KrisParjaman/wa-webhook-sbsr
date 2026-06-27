@@ -4229,11 +4229,33 @@ async function tryHandleAddressPinConfirm(from, userText) {
   const draft = loadSbsrDraft(from);
   if (!draft || String(draft.state || "").trim().toLowerCase() !== "awaiting_address_pin_confirm") return false;
   const t = String(userText || "").trim().toLowerCase();
+
+  // ── Cancel / restart escape hatch ──────────────────────────────
+  // Customer stuck in the 1/2/3 loop can bail out with cancel/restart
+  // keywords. Patterns are broader than the global SBSR_CANCEL_INTENT_RE
+  // to catch "oke cancel kak", "ya batal", "ga jadi mesen", etc.
+  // Must run BEFORE isOpt2 so bare "ulang" still maps to "kirim ulang".
+  const _cancelEscapeRe = /\b(?:cancel|batal|ga\s*jadi|gak\s*jadi|nggak\s*jadi|tidak\s+jadi|batalin|ga\s+jadi\s+(?:mesen|order|pesan|aja|deh|dulu))\b/i;
+  const _restartEscapeRe = /\b(?:reset|mulai\s*(?:lagi|ulang|dari\s*awal)|ulangi|ulang\s*dari\s*awal|start\s*over)\b/i;
+  // Only fire when the user is NOT explicitly choosing option 2 ("ulang"/"kirim ulang")
+  const _isOpt2Quick = /^(?:2|2[\).\s]|kirim ulang|ulang|pakai pin|pin maps|pin|kirim ulang titik maps)\b/i.test(t);
+  if ((_cancelEscapeRe.test(t) || _restartEscapeRe.test(t)) && !_isOpt2Quick) {
+    log("sbsr-address-pin-confirm", "cancel_escape text=" + t.slice(0, 60));
+    clearSbsrCheckoutForCancel(from);
+    await sendWhatsAppMessage(from,
+      "Siap Kak, Mintu batalkan dulu ya \u{1f90d}\n\n" +
+      "Mau mulai lagi? Ketik *MENU* untuk lihat katalog atau pilih:\n" +
+      "1. Kirimkan menu/pricelist\n2. Mau langsung order\n3. Mau tanya-tanya"
+    );
+    return true;
+  }
+  // ── end cancel escape hatch ────────────────────────────────────
+
   const mapsMatch = String(userText || "").match(MAPS_URL_RE);
   const directCoords = parseDirectGmapsCoordsBridge(userText) || extractCoordsFromMapsUrlBridge(userText);
   const conf = draft.address_pin_confirm || {};
   const isOpt1 = /^(?:1|1[\).\s]|pakai alamat|alamat|alamat tertulis)\b/i.test(t);
-  const isOpt2 = /^(?:2|2[\).\s]|kirim ulang|ulang|pakai pin|pin maps|pin|kirim ulang titik maps)\b/i.test(t);
+  const isOpt2 = _isOpt2Quick;
   const isOpt3 = /^(?:3|3[\).\s]|admin|sambungkan ke admin|hubungkan ke admin)\b/i.test(t);
   if (mapsMatch || directCoords) {
     const next = {
@@ -7314,7 +7336,9 @@ function shouldResetSbsrSessionOnReentry(text) {
 const SBSR_RESTART_INTENT_RE = /^(?:hi|hello|halo|hai|menu|mulai\s+lagi|restart|ulang|start|ok|oke|reset)\b/i;
 const SBSR_MANUAL_RESET_RE = /^(?:reset|mulai\s+lagi|start\s+over|test\s+ulang)\s*$/i;
 const SBSR_MENU_INTENT_RE = /^(?:menu|katalog|catalog|pricelist|price\s*list|lihat\s+menu|kirim\s+menu|show\s+menu|mau\s+lihat\s+menu|order\s+lagi|mau\s+order\s+lagi)\b/i;
-const SBSR_CANCEL_INTENT_RE = /^(?:cancel|batal|ga\s+jadi|gak\s+jadi|nggak\s+jadi|tidak\s+jadi|ulang|ulangi|order\s+ulang|mulai\s+ulang|reset\s+order|hapus\s+pesanan|batalin)\b/i;
+// Broader than before: removed ^ anchor so "oke cancel kak", "ya batal deh", etc. match.
+// Still gated by isCheckoutActiveState() at the call site, so false positives are contained.
+const SBSR_CANCEL_INTENT_RE = /\b(?:cancel|batal|ga\s+jadi|gak\s+jadi|nggak\s+jadi|tidak\s+jadi|ulang|ulangi|order\s+ulang|mulai\s+ulang|reset\s+order|hapus\s+pesanan|batalin)\b/i;
 const SBSR_ADD_MORE_INTENT_RE = /^(?:nambah|tambah|mau\s+tambah|tambah\s+pesanan|tambah\s+menu|tambah\s+lagi|add\s+more|menu\s+lagi|lihat\s+menu\s+lagi|pesan\s+lagi|mau\s+nambah)\b/i;
 const SBSR_ADD_MORE_CONFIRM_RE = /^(?:1|ya|iya|ok|oke|lanjut)\b/i;
 const SBSR_ADD_MORE_DECLINE_RE = /^(?:2|tidak|gak|ga|nggak|no|lanjut\s+pembayaran)\b/i;
@@ -9531,6 +9555,25 @@ async function handleMessage(msg, contacts) {
       // LLM-FIRST GUARD: during active checkout, let LLM handle ALL conversation
       // Bridge only handles structured inputs (interactive replies, location, address parse)
       if (_activeCheckoutForMenu) {
+        // ── Cancel / restart escape hatch ──────────────────────────
+        // Even during active checkout, customer must be able to bail out.
+        // Patterns broader than global isCancelIntent — catches "oke cancel",
+        // "ga jadi mesen", "reset dong", etc. that the ^-anchored regex misses.
+        const _coBroadCancelRe = /\b(?:cancel|batal|ga\s*jadi|gak\s*jadi|nggak\s*jadi|tidak\s+jadi|batalin|ga\s+jadi\s+(?:mesen|order|pesan|aja|deh|dulu))\b/i;
+        const _coBroadRestartRe = /\b(?:reset|mulai\s*(?:lagi|ulang|dari\s*awal)|ulangi)\b/i;
+        if (_coBroadCancelRe.test(userText) || _coBroadRestartRe.test(userText)) {
+          log("sbsr-llm-first-guard", "cancel_restart_during_active_checkout");
+          clearSbsrCheckoutForCancel(from);
+          try {
+            await sendWhatsAppMessage(from,
+              "Siap Kak, Mintu batalkan dulu ya \u{1f90d}\n\n" +
+              "Mau mulai lagi? Ketik *MENU* untuk lihat katalog atau pilih:\n" +
+              "1. Kirimkan menu/pricelist\n2. Mau langsung order\n3. Mau tanya-tanya"
+            );
+          } catch (_) {}
+          sendReaction(from, messageId, "").catch(() => {});
+          return;
+        }
         log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
       } else if (isMenuIntent(userText)) {
         log("sbsr-menu-interrupt", "detected");
