@@ -7354,6 +7354,20 @@ const CLASSIFIER_VALID_INTENTS = new Set([
 ]);
 const CLASSIFIER_SKIP_RE = /^(?:ok|oke|okay|ya|iya|tidak|gak|nggak|no|yes|sip|siap|deal|lanjut|sudah|1|2|3|4|\d+)\s*$/i;
 const CLASSIFIER_MAPS_SKIP_RE = /^https?:\/\/.*(?:google\.com\/maps|maps\.google|goo\.gl\/maps|maps\.app\.goo\.gl)/i;
+const CLASSIFIER_MAX_CLARIFY = 3; // max tanya balik sebelum fallback ke regex
+
+// Clarification counter — disimpan di draft._clarify_count
+function getClarifyCount(draft) { return Number(draft?._clarify_count) || 0; }
+function resetClarifyCount(from) {
+  const d = loadSbsrDraft(from) || {};
+  if (d._clarify_count) { saveSbsrDraft(from, { ...d, _clarify_count: 0 }); }
+}
+function incrementClarifyCount(from) {
+  const d = loadSbsrDraft(from) || {};
+  const n = getClarifyCount(d) + 1;
+  saveSbsrDraft(from, { ...d, _clarify_count: n });
+  return n;
+}
 
 const SBSR_RESTART_PROTECTED_STATES = new Set([
   "awaiting_invoice_confirm",
@@ -9149,10 +9163,33 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     "reset — minta reset/mulai ulang. Contoh: 'reset', 'mulai dari awal', 'start over'",
     "",
     "=== FORMAT OUTPUT (JSON SAJA, tanpa markdown) ===",
+    "Kalau kamu YAKIN dengan intent-nya:",
     "{",
     "  \"intent\": \"<salah satu dari daftar di atas>\",",
-    "  \"confidence\": \"high\" | \"medium\" | \"low\"",
+    "  \"confidence\": \"high\"",
     "}",
+    "",
+    "Kalau kamu RAGU (ada beberapa kemungkinan):",
+    "{",
+    "  \"intent\": \"unknown\",",
+    "  \"confidence\": \"medium\",",
+    "  \"clarification\": \"<pertanyaan natural dalam Bahasa Indonesia untuk memperjelas maksud customer>\"",
+    "}",
+    "",
+    "Kalau kamu SANGAT TIDAK YAKIN:",
+    "{",
+    "  \"intent\": \"unknown\",",
+    "  \"confidence\": \"low\"",
+    "}",
+    "",
+    "ATURAN CLARIFICATION:",
+    "- Tanya dengan ramah & natural — seperti manusia, bukan robot.",
+    "- Jangan terlalu panjang (maks 2 kalimat pendek).",
+    "- Langsung ke intinya — tanya apa yang ambigu.",
+    "- JANGAN sebut kata 'intent', 'classifier', 'confidence', atau 'sistem'.",
+    "- Akhiri dengan emoji \u{1f90d} supaya tetap warm.",
+    "- Contoh bagus: 'Maksudnya Kakak mau pesan atau cuma tanya harga dulu? \u{1f90d}'",
+    "- Contoh jelek: 'Intent tidak terdeteksi. Harap klarifikasi maksud Anda.'",
     "",
     "=== PESAN CUSTOMER ===",
     userText,
@@ -9221,8 +9258,13 @@ async function classifyIntentWithLLM(from, userText, draft, bridgeContext) {
       ? parsed.confidence
       : "medium";
 
-    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence);
-    return { intent: parsed.intent, confidence };
+    const clarification = (confidence === "medium" && parsed.clarification)
+      ? String(parsed.clarification).trim()
+      : null;
+
+    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence +
+        (clarification ? " clarify=" + clarification.slice(0, 60) : ""));
+    return { intent: parsed.intent, confidence, clarification };
   } catch (err) {
     log("llm-classifier", "error=" + (err && err.message || "?"));
     return null;
@@ -9893,9 +9935,10 @@ async function handleMessage(msg, contacts) {
         log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
 
       // === LLM-FIRST INTENT CLASSIFIER =================================
-      // Kirim pesan customer ke LLM untuk klasifikasi intent.
-      // Confidence "high" → route ke template handler → return.
-      // Confidence "medium"/"low" atau error → fall through ke regex pipeline di bawah.
+      // 3 jalur berdasarkan confidence:
+      //   high   → route ke template handler → return
+      //   medium → LLM tanya balik (clarification) → return, tunggu jawaban
+      //   low    → fall through ke regex pipeline
       if (sbsrLlmClassifierEnabled) {
         let _cfHandled = false;
         try {
@@ -9903,7 +9946,10 @@ async function handleMessage(msg, contacts) {
           const _cfResult = await classifyIntentWithLLM(
             from, userText, _preDraftForMenu, _cfBridgeCtx
           );
+
           if (_cfResult && _cfResult.confidence === "high") {
+            // ── PATH A: Confident → eksekusi ──────────────────────
+            resetClarifyCount(from);
             log("llm-classifier", "HANDLED intent=" + _cfResult.intent + " conf=" + _cfResult.confidence);
             _cfHandled = await routeClassifiedIntent(from, userText, _cfResult.intent, messageId);
             if (_cfHandled) {
@@ -9911,8 +9957,32 @@ async function handleMessage(msg, contacts) {
               return;
             }
             log("llm-classifier", "route returned false — fallthrough to regex");
+
+          } else if (_cfResult && _cfResult.confidence === "medium" && _cfResult.clarification) {
+            // ── PATH B: Ragu → tanya balik, jangan nebak ──────────
+            const _clarifyCount = incrementClarifyCount(from);
+            log("llm-classifier", "CLARIFY #" + _clarifyCount +
+                " q=" + _cfResult.clarification.slice(0, 60));
+            if (_clarifyCount >= CLASSIFIER_MAX_CLARIFY) {
+              // Max retries reached — jangan tanya terus
+              resetClarifyCount(from);
+              log("llm-classifier", "max_clarify_reached — fallthrough to regex");
+            } else {
+              await sendWhatsAppMessage(from, _cfResult.clarification);
+              setPendingBridgeContext(from, [
+                "Classifier sebelumnya ragu dengan pesan customer.",
+                "Bot sudah tanya: \"" + _cfResult.clarification + "\"",
+                "Sekarang tunggu jawaban customer untuk re-klasifikasi.",
+                "JANGAN ulangi pertanyaan yang sama — customer sudah ditanya.",
+              ].join("\n"));
+              sendReaction(from, messageId, "").catch(() => {});
+              return;
+            }
+
           } else if (_cfResult) {
-            log("llm-classifier", "low_conf intent=" + _cfResult.intent + " conf=" + _cfResult.confidence + " — fallthrough to regex");
+            // ── PATH C: Low confidence → fallback ─────────────────
+            log("llm-classifier", "low_conf intent=" + _cfResult.intent +
+                " conf=" + _cfResult.confidence + " — fallthrough to regex");
           }
         } catch (_cfErr) {
           log("llm-classifier", "error=" + (_cfErr && _cfErr.message || "?") + " — fallthrough to regex");
