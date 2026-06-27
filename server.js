@@ -7366,6 +7366,9 @@ function isRestartIntent(text, state) {
   // Keep checkout confirmation/payment rails deterministic.
   if ((t === "ok" || t === "oke" || t === "ya") && String(state || "").trim().toLowerCase() === "awaiting_invoice_confirm") return false;
   if (/^halo\b/i.test(t) && /\b(?:beli|pesan|order|mau |butuh|tanya|ingin)\b/i.test(t)) return false;
+  // "ok"/"oke" with substantial content → conversational, not restart.
+  // "Oke sudah aman kak", "ok baik makasih" — 3+ words = not a restart command.
+  if (/^(?:ok|oke)\b/i.test(t) && t.split(/\s+/).length > 2) return false;
   return true;
 }
 function isMenuIntent(text) {
