@@ -7333,7 +7333,7 @@ function shouldResetSbsrSessionOnReentry(text) {
   return SBSR_SESSION_REENTRY_RE.test(String(text || "").trim());
 }
 
-const SBSR_RESTART_INTENT_RE = /^(?:hi|hello|halo|hai|menu|mulai\s+lagi|restart|ulang|start|ok|oke|reset)\b/i;
+const SBSR_RESTART_INTENT_RE = /^(?:hi|hello|halo|hai|menu|mulai\s+lagi|restart|ulang|start|reset)\b/i;
 const SBSR_MANUAL_RESET_RE = /^(?:reset|mulai\s+lagi|start\s+over|test\s+ulang)\s*$/i;
 const SBSR_MENU_INTENT_RE = /^(?:menu|katalog|catalog|pricelist|price\s*list|lihat\s+menu|kirim\s+menu|show\s+menu|mau\s+lihat\s+menu|order\s+lagi|mau\s+order\s+lagi)\b/i;
 // Broader than before: removed ^ anchor so "oke cancel kak", "ya batal deh", etc. match.
@@ -7363,12 +7363,8 @@ const SBSR_MENU_PROTECTED_STATES = new Set([
 function isRestartIntent(text, state) {
   const t = String(text || "").trim().toLowerCase();
   if (!SBSR_RESTART_INTENT_RE.test(t)) return false;
-  // Keep checkout confirmation/payment rails deterministic.
-  if ((t === "ok" || t === "oke" || t === "ya") && String(state || "").trim().toLowerCase() === "awaiting_invoice_confirm") return false;
+  // "halo mau pesan", "hai mau tanya", etc. are order intents, not restart.
   if (/^halo\b/i.test(t) && /\b(?:beli|pesan|order|mau |butuh|tanya|ingin)\b/i.test(t)) return false;
-  // "ok"/"oke" with substantial content → conversational, not restart.
-  // "Oke sudah aman kak", "ok baik makasih" — 3+ words = not a restart command.
-  if (/^(?:ok|oke)\b/i.test(t) && t.split(/\s+/).length > 2) return false;
   return true;
 }
 function isMenuIntent(text) {
