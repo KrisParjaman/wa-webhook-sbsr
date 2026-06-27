@@ -7342,6 +7342,19 @@ const SBSR_CANCEL_INTENT_RE = /\b(?:cancel|batal|ga\s+jadi|gak\s+jadi|nggak\s+ja
 const SBSR_ADD_MORE_INTENT_RE = /^(?:nambah|tambah|mau\s+tambah|tambah\s+pesanan|tambah\s+menu|tambah\s+lagi|add\s+more|menu\s+lagi|lihat\s+menu\s+lagi|pesan\s+lagi|mau\s+nambah)\b/i;
 const SBSR_ADD_MORE_CONFIRM_RE = /^(?:1|ya|iya|ok|oke|lanjut)\b/i;
 const SBSR_ADD_MORE_DECLINE_RE = /^(?:2|tidak|gak|ga|nggak|no|lanjut\s+pembayaran)\b/i;
+
+// ── LLM-FIRST INTENT CLASSIFIER CONFIG ─────────────────────────────
+const SBSR_LLM_CLASSIFIER = process.env.SBSR_LLM_CLASSIFIER !== "0"; // default ON
+const CLASSIFIER_TIMEOUT_MS = 4000; // 4 detik — lebih cepat dari main LLM timeout (240s)
+const CLASSIFIER_VALID_INTENTS = new Set([
+  "greeting", "request_menu", "place_order", "cancel_order",
+  "confirm", "deny", "provide_name", "provide_address",
+  "provide_location", "choose_option", "ask_question",
+  "add_more", "change_order", "general_chat", "reset"
+]);
+const CLASSIFIER_SKIP_RE = /^(?:ok|oke|okay|ya|iya|tidak|gak|nggak|no|yes|sip|siap|deal|lanjut|sudah|1|2|3|4|\d+)\s*$/i;
+const CLASSIFIER_MAPS_SKIP_RE = /^https?:\/\/.*(?:google\.com\/maps|maps\.google|goo\.gl\/maps|maps\.app\.goo\.gl)/i;
+
 const SBSR_RESTART_PROTECTED_STATES = new Set([
   "awaiting_invoice_confirm",
   "awaiting_proof",
@@ -9087,6 +9100,288 @@ async function llmFirstRouter(from, text, draft) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// LLM-FIRST INTENT CLASSIFIER
+// ═══════════════════════════════════════════════════════════════════
+
+function buildClassifierPrompt(from, userText, draft, bridgeContext) {
+  const state = String(draft?.state || "none").trim().toLowerCase();
+  const customerName = String(draft?.customer_name || "");
+  const useCase = String(draft?.use_case || "");
+  const deliveryMode = String(draft?.delivery_mode || "");
+  const items = Array.isArray(draft?.items) ? draft.items : [];
+  const cartSummary = items.length > 0
+    ? items.map(it => (it.qty || 1) + "x " + (it.name || "?") + " (" + (it.form || "?") + ")").join(", ")
+    : "(kosong)";
+
+  return [
+    "Kamu adalah classifier intent chat untuk toko Risol Sentuh Rasa.",
+    "Tugasmu HANYA mengklasifikasikan intent pesan customer dalam Bahasa Indonesia.",
+    "JANGAN menghasilkan teks balasan — output JSON SAJA.",
+    "",
+    "=== STATUS PELANGGAN ===",
+    "State saat ini: " + state,
+    "Nama: " + (customerName || "(belum diisi)"),
+    "Use case: " + (useCase || "(belum dipilih)"),
+    "Delivery mode: " + (deliveryMode || "(belum dipilih)"),
+    "Isi cart: " + cartSummary,
+    "",
+    "=== KONTEKS PERCAKAPAN ===",
+    bridgeContext || "(tidak ada — ini pesan pertama atau setelah reset)",
+    "",
+    "=== DAFTAR INTENT ===",
+    "Pilih SATU intent yang paling tepat:",
+    "",
+    "greeting — customer menyapa. Contoh: 'halo', 'pagi', 'assalamualaikum', 'test 123'",
+    "request_menu — minta lihat menu/katalog. Contoh: 'menu dong', 'kirim katalognya', 'ada varian apa?'",
+    "place_order — mau pesan/order produk. Contoh: 'mau risol 6pcs ayam sayur', 'order dong', 'beli frozen'",
+    "cancel_order — membatalkan pesanan. Contoh: 'cancel', 'batalin ya', 'ga jadi mesen'",
+    "confirm — konfirmasi setuju/lanjut. Contoh: 'ya', 'ok', 'sip', 'lanjut', 'betul', 'gass'",
+    "deny — menolak/tidak setuju. Contoh: 'tidak', 'gak', 'salah', 'bukan', 'nggak jadi'",
+    "provide_name — memberikan nama. Contoh: 'atas nama Budi', 'saya Andi', 'jokowi'",
+    "provide_address — memberikan alamat teks. Contoh: 'Jl Merdeka No 12', 'Perum Citra Blok A'",
+    "provide_location — share Google Maps URL atau WhatsApp location pin",
+    "choose_option — memilih dari opsi yang ditawarkan. Contoh: '1', 'delivery', 'goreng', 'paxel'",
+    "ask_question — bertanya tentang produk/harga/cara pesan. Contoh: 'halal ga?', 'ongkir berapa?'",
+    "add_more — mau tambah pesanan. Contoh: 'nambah dong', 'tambah chili sauce'",
+    "change_order — mau ubah/ganti/revisi pesanan. Contoh: 'ganti varian', 'ubah jadi frozen'",
+    "general_chat — percakapan di luar konteks pemesanan. Contoh: 'gimana kabar?', joke, spam, curhat",
+    "reset — minta reset/mulai ulang. Contoh: 'reset', 'mulai dari awal', 'start over'",
+    "",
+    "=== FORMAT OUTPUT (JSON SAJA, tanpa markdown) ===",
+    "{",
+    "  \"intent\": \"<salah satu dari daftar di atas>\",",
+    "  \"confidence\": \"high\" | \"medium\" | \"low\"",
+    "}",
+    "",
+    "=== PESAN CUSTOMER ===",
+    userText,
+  ].join("\n");
+}
+
+async function classifyIntentWithLLM(from, userText, draft, bridgeContext) {
+  const t = String(userText || "").trim();
+
+  if (CLASSIFIER_SKIP_RE.test(t)) {
+    log("llm-classifier", "skip_structured text=" + t.slice(0, 30));
+    return null;
+  }
+  if (CLASSIFIER_MAPS_SKIP_RE.test(t)) {
+    log("llm-classifier", "skip_maps_url");
+    return null;
+  }
+  if (t.length < 3) {
+    log("llm-classifier", "skip_short len=" + t.length);
+    return null;
+  }
+  if (t.length > 500) {
+    log("llm-classifier", "skip_long len=" + t.length);
+    return null;
+  }
+
+  const prompt = buildClassifierPrompt(from, userText, draft, bridgeContext);
+
+  try {
+    const raw = await Promise.race([
+      sendToOpenClaw("intent-" + Date.now() + "-" + from, prompt),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Classifier timeout")), CLASSIFIER_TIMEOUT_MS)
+      ),
+    ]);
+
+    if (!raw || !String(raw).trim()) {
+      log("llm-classifier", "empty_response");
+      return null;
+    }
+
+    let cleaned = String(raw).trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "");
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (_) {
+      const m = cleaned.match(/\{[\s\S]*"intent"[\s\S]*\}/);
+      if (m) {
+        try { parsed = JSON.parse(m[0]); } catch (__) { /* ignore */ }
+      }
+      if (!parsed) {
+        log("llm-classifier", "json_parse_failed raw=" + cleaned.slice(0, 100));
+        return null;
+      }
+    }
+
+    if (!parsed || !CLASSIFIER_VALID_INTENTS.has(parsed.intent)) {
+      log("llm-classifier", "invalid_intent=" + (parsed?.intent || "?"));
+      return null;
+    }
+
+    const confidence = ["high", "medium", "low"].includes(parsed.confidence)
+      ? parsed.confidence
+      : "medium";
+
+    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence);
+    return { intent: parsed.intent, confidence };
+  } catch (err) {
+    log("llm-classifier", "error=" + (err && err.message || "?"));
+    return null;
+  }
+}
+
+async function routeClassifiedIntent(from, userText, intent, messageId) {
+  const draft = loadSbsrDraft(from) || { phone: from };
+  const state = sbsrRouterStateLabel(draft);
+
+  log("llm-classifier", "route intent=" + intent + " state=" + state);
+
+  try {
+    switch (intent) {
+
+      case "greeting": {
+        if (isSbsrCheckoutCollectionActive(draft)) return false;
+        if (await tryHandleDeterministicGreeting(from, userText)) return true;
+        await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+        return true;
+      }
+
+      case "request_menu": {
+        if (isProtectedPaymentFlowDraft(draft)) {
+          const d = loadSbsrDraft(from) || {};
+          saveSbsrDraft(from, { ...d, add_more_mode: true });
+          await sendWhatsAppMessage(from, "Siap Kak, ini katalognya ya \u{1f90d}");
+          await sendWhatsAppCatalog(from);
+          return true;
+        }
+        resetSbsrCheckoutState(from);
+        await sendWhatsAppMessage(from, formatSbsrFullMenuText());
+        await sendWhatsAppCatalog(from);
+        await sendSbsrUseCasePrompt(from, { phone: from });
+        return true;
+      }
+
+      case "place_order": {
+        if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
+          return true;
+        }
+        await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
+        await sendWhatsAppCatalog(from);
+        return true;
+      }
+
+      case "cancel_order": {
+        if (isCheckoutActiveState(state)) {
+          clearSbsrCheckoutForCancel(from);
+          await sendWhatsAppMessage(from,
+            "Siap Kak, pesanan sebelumnya Mintu batalkan ya \u{1f90d}\n\n" +
+            "Mau mulai lagi? Ketik *MENU* untuk lihat katalog atau pilih:\n" +
+            "1. Kirimkan menu/pricelist\n2. Mau langsung order\n3. Mau tanya-tanya"
+          );
+        } else {
+          await sendWhatsAppMessage(from,
+            "Kak, belum ada pesanan aktif yang perlu dibatalkan ya \u{1f90d}\n" +
+            "Ketik *MENU* untuk mulai order."
+          );
+        }
+        return true;
+      }
+
+      case "confirm": {
+        if (state === "awaiting_invoice_confirm" && await tryHandleInvoiceOk(from, userText)) return true;
+        if (state === "awaiting_order_confirm" && typeof tryHandleOrderConfirm === "function" && await tryHandleOrderConfirm(from, userText)) return true;
+        if (state === "awaiting_meeting_package_confirm" && typeof tryHandleMeetingPackageConfirm === "function" && await tryHandleMeetingPackageConfirm(from, userText)) return true;
+        if (state === "awaiting_pin_confirm" && await tryHandlePinConfirm(from, userText)) return true;
+        return false;
+      }
+
+      case "deny": {
+        if (state === "awaiting_order_confirm" && typeof tryHandleOrderConfirm === "function" && await tryHandleOrderConfirm(from, userText)) return true;
+        if (state === "awaiting_meeting_package_confirm" && typeof tryHandleMeetingPackageConfirm === "function" && await tryHandleMeetingPackageConfirm(from, userText)) return true;
+        return false;
+      }
+
+      case "provide_name": {
+        if (typeof tryHandleNameCapture === "function" && await tryHandleNameCapture(from, userText)) return true;
+        const nameRe = /(?:nama|atas\s*nama|saya|aku|gw|gue)\s*:?\s*(.+)/i;
+        const m = userText.match(nameRe);
+        if (m && m[1].trim().length >= 2) {
+          const d = loadSbsrDraft(from) || {};
+          saveSbsrDraft(from, { ...d, customer_name: m[1].trim() });
+          log("llm-classifier", "shadow_name_capture name=" + m[1].trim());
+        }
+        return false;
+      }
+
+      case "provide_address": {
+        if (typeof tryHandleAddressTextCapture === "function" && await tryHandleAddressTextCapture(from, userText)) return true;
+        return false;
+      }
+
+      case "provide_location": {
+        if (await tryHandleBareMapsUrl(from, userText)) return true;
+        if (await tryHandleAddressAndQuote(from, userText)) return true;
+        return false;
+      }
+
+      case "choose_option": {
+        if (await tryHandleDeliveryMethodSelection(from, userText)) return true;
+        if (await tryHandleUseCaseRouter(from, userText)) return true;
+        if (typeof tryHandleFrozenCourierChoice === "function" && await tryHandleFrozenCourierChoice(from, userText)) return true;
+        if (typeof tryHandlePickupFlow === "function" && await tryHandlePickupFlow(from, userText)) return true;
+        if (await tryHandleAddressPinConfirm(from, userText)) return true;
+        return false;
+      }
+
+      case "ask_question": {
+        if (typeof tryHandleFaq === "function" && await tryHandleFaq(from, userText)) return true;
+        return false;
+      }
+
+      case "add_more": {
+        const d = loadSbsrDraft(from) || {};
+        if (!Array.isArray(d.items) || d.items.length === 0) {
+          await sendSbsrUseCasePrompt(from, { phone: from });
+          await sendWhatsAppCatalog(from);
+          return true;
+        }
+        if (typeof tryHandleGlobalAddMore === "function" && await tryHandleGlobalAddMore(from, userText)) {
+          return true;
+        }
+        saveSbsrDraft(from, { ...d, add_more_mode: true, state: "awaiting_product_selection" });
+        await sendWhatsAppMessage(from, "Siap Kak, silakan pilih dari katalog ya \u{1f90d} nanti totalnya Mintu gabungkan.");
+        await sendWhatsAppCatalog(from);
+        return true;
+      }
+
+      case "change_order": {
+        const d = loadSbsrDraft(from) || {};
+        if (!Array.isArray(d.items) || d.items.length === 0) {
+          await sendWhatsAppMessage(from, "Kak, belum ada pesanan yang bisa diubah. Ketik *MENU* untuk mulai order ya \u{1f90d}");
+          return true;
+        }
+        saveSbsrDraft(from, { ...d, items: null, addons: null, subtotal: null, cart: null, state: "awaiting_product_selection" });
+        await sendWhatsAppMessage(from, "Siap Kak, pesanan sebelumnya Mintu reset dulu ya. Silakan pilih ulang dari katalog \u{1f90d}");
+        await sendWhatsAppCatalog(from);
+        return true;
+      }
+
+      case "reset": {
+        hardResetSbsrSession(from);
+        await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+        return true;
+      }
+
+      case "general_chat":
+      default: {
+        return false;
+      }
+    }
+  } catch (_routeErr) {
+    log("llm-classifier", "route_error intent=" + intent + " err=" + (_routeErr && _routeErr.message || "?"));
+    return false;
+  }
+}
+
 async function handleMessage(msg, contacts) {
   const from = msg.from;
   const messageId = msg.id;
@@ -9574,6 +9869,35 @@ async function handleMessage(msg, contacts) {
           return;
         }
         log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
+
+      // === LLM-FIRST INTENT CLASSIFIER =================================
+      // Kirim pesan customer ke LLM untuk klasifikasi intent.
+      // Confidence "high" → route ke template handler → return.
+      // Confidence "medium"/"low" atau error → fall through ke regex pipeline di bawah.
+      if (SBSR_LLM_CLASSIFIER) {
+        let _cfHandled = false;
+        try {
+          const _cfBridgeCtx = consumePendingBridgeContext(from);
+          const _cfResult = await classifyIntentWithLLM(
+            from, userText, _preDraftForMenu, _cfBridgeCtx
+          );
+          if (_cfResult && _cfResult.confidence === "high") {
+            log("llm-classifier", "HANDLED intent=" + _cfResult.intent + " conf=" + _cfResult.confidence);
+            _cfHandled = await routeClassifiedIntent(from, userText, _cfResult.intent, messageId);
+            if (_cfHandled) {
+              sendReaction(from, messageId, "").catch(() => {});
+              return;
+            }
+            log("llm-classifier", "route returned false — fallthrough to regex");
+          } else if (_cfResult) {
+            log("llm-classifier", "low_conf intent=" + _cfResult.intent + " conf=" + _cfResult.confidence + " — fallthrough to regex");
+          }
+        } catch (_cfErr) {
+          log("llm-classifier", "error=" + (_cfErr && _cfErr.message || "?") + " — fallthrough to regex");
+        }
+      }
+      // === END LLM-FIRST INTENT CLASSIFIER =============================
+
       } else if (isMenuIntent(userText)) {
         log("sbsr-menu-interrupt", "detected");
         if (isProtectedPaymentFlowDraft(_preDraftForMenu)) {
