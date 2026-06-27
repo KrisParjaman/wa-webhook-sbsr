@@ -7344,7 +7344,7 @@ const SBSR_ADD_MORE_CONFIRM_RE = /^(?:1|ya|iya|ok|oke|lanjut)\b/i;
 const SBSR_ADD_MORE_DECLINE_RE = /^(?:2|tidak|gak|ga|nggak|no|lanjut\s+pembayaran)\b/i;
 
 // ── LLM-FIRST INTENT CLASSIFIER CONFIG ─────────────────────────────
-const SBSR_LLM_CLASSIFIER = process.env.SBSR_LLM_CLASSIFIER !== "0"; // default ON
+let sbsrLlmClassifierEnabled = process.env.SBSR_LLM_CLASSIFIER !== "0"; // default ON, toggle via /classifier_on|off
 const CLASSIFIER_TIMEOUT_MS = 4000; // 4 detik — lebih cepat dari main LLM timeout (240s)
 const CLASSIFIER_VALID_INTENTS = new Set([
   "greeting", "request_menu", "place_order", "cancel_order",
@@ -9791,6 +9791,28 @@ async function handleMessage(msg, contacts) {
     // is silently dropped: no LLM, no catalog, no cart-sniff, no auto-quote, no bukti.
     // Use a separate test number for customer-side demos (e.g. +4915204107177).
     if (ADMIN_PHONES.includes(from)) {
+      // ── Classifier toggle (live, no restart) ──────────────────
+      const _cfToggle = String(userText || "").trim().toLowerCase();
+      if (_cfToggle === "/classifier_on") {
+        sbsrLlmClassifierEnabled = true;
+        log("llm-classifier", "ENABLED by admin " + from);
+        await sendWhatsAppMessage(from, "Classifier ON \u{1f7e2} — LLM akan klasifikasi intent customer.");
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
+      }
+      if (_cfToggle === "/classifier_off") {
+        sbsrLlmClassifierEnabled = false;
+        log("llm-classifier", "DISABLED by admin " + from);
+        await sendWhatsAppMessage(from, "Classifier OFF \u{1f534} — fallback ke regex pipeline.");
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
+      }
+      if (_cfToggle === "/classifier_status") {
+        await sendWhatsAppMessage(from, "Classifier: " + (sbsrLlmClassifierEnabled ? "ON \u{1f7e2}" : "OFF \u{1f534}"));
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
+      }
+      // ── End classifier toggle ────────────────────────────────
       try {
         if (await tryHandleAdminCmd(from, userText)) {
           log("intercept", "tryHandleAdminCmd " + from);
@@ -9874,7 +9896,7 @@ async function handleMessage(msg, contacts) {
       // Kirim pesan customer ke LLM untuk klasifikasi intent.
       // Confidence "high" → route ke template handler → return.
       // Confidence "medium"/"low" atau error → fall through ke regex pipeline di bawah.
-      if (SBSR_LLM_CLASSIFIER) {
+      if (sbsrLlmClassifierEnabled) {
         let _cfHandled = false;
         try {
           const _cfBridgeCtx = consumePendingBridgeContext(from);
