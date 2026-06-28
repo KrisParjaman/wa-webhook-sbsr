@@ -14,6 +14,7 @@ let waSender = null;
 let catalogManager = null;
 let paymentEngine = null;
 let draftStore = null;
+let gsheetSync = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -21,6 +22,7 @@ try {
   catalogManager = require("./lib/catalog-manager.cjs");
   paymentEngine = require("./lib/payment-engine.cjs");
   draftStore = require("./lib/draft-store.cjs");
+  gsheetSync = require("./lib/gsheet-sync.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -6665,6 +6667,12 @@ function _initEngine() {
     getPrices: function() { return catalogPrices; },
     getAvailability: function() { return catalogAvailability; },
     log: log,
+  });
+  // Init gsheet-sync
+  if (gsheetSync) gsheetSync.init({
+    toNum: toNum, fmtYmd: fmtYmd, nowJakartaDate: nowJakartaDate,
+    normalizePhone08: normalizePhone08, pickNonEmpty: pickNonEmpty,
+    openclawContainer: OPENCLAW_EXEC_CONTAINER,
   });
   // Init payment-engine
   if (paymentEngine) paymentEngine.init({
