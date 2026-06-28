@@ -6,6 +6,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const { Pool } = require("pg");
+const pgPool = new Pool({ connectionString: process.env.POSTGRES_URL });
 
 // --- Admin inbox module (chat log + /admin panel). Never allow to break bot. ---
 let admin;
@@ -99,17 +101,25 @@ const RECEIPT_BASE_URL = "https://production.biks.ai/receipts/";
 const IMGBB_KEY = "7f6defdcbb8475ac203f45c966b36a78";
 const UPLOAD_DIR = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads";
 
-// --- Catalog product ID mapping (Meta API live + JSON fallback) ---
+// --- Catalog product ID mapping (PostgreSQL primary, Meta API live sync) ---
 const CATALOG_API_TOKEN = process.env.CATALOG_API_TOKEN || "";
 const CATALOG_ID = process.env.WA_CATALOG_ID || "1477386560782761";
 let catalogMap = {};
 let catalogPrices = {};
 let catalogAvailability = {};
 
-// Load static catalog-map.json as base
-try { catalogMap = JSON.parse(fs.readFileSync("/docker/wa-webhook-sbsr/catalog-map.json", "utf8")); } catch (_) {}
+// Load catalog_products from PostgreSQL into memory on startup
+async function loadCatalogFromDB() {
+  const res = await pgPool.query("SELECT retailer_id, name, price, availability FROM catalog_products");
+  for (const row of res.rows) {
+    catalogMap[row.retailer_id] = row.name;
+    if (row.price > 0) catalogPrices[row.retailer_id] = row.price;
+    if (row.availability) catalogAvailability[row.retailer_id] = row.availability;
+  }
+  console.error("[catalog-db] loaded " + res.rows.length + " products from PostgreSQL");
+}
 
-// Refresh catalog from Meta API
+// Refresh catalog from Meta API, then persist updated data back to PostgreSQL
 async function refreshCatalogFromAPI() {
   if (!CATALOG_API_TOKEN) return;
   try {
@@ -125,7 +135,6 @@ async function refreshCatalogFromAPI() {
       var p = data.data[i];
       var rid = p.retailer_id;
       if (!rid) continue;
-      // Use API name if available, otherwise keep existing catalog-map name
       if (p.name) catalogMap[rid] = p.name;
       var priceRaw = String(p.price || "0").replace(/[^0-9]/g, "");
       var price = parseInt(priceRaw) || 0;
@@ -143,26 +152,53 @@ async function refreshCatalogFromAPI() {
     console.error("[catalog-api] refreshed " + updated + " products from Meta");
     var availCount = Object.keys(catalogAvailability).length;
     if (availCount > 0) console.error("[catalog-api] availability data for " + availCount + " products");
+    // Persist latest prices and availability back to PostgreSQL (fire-and-forget)
+    if (updated > 0) {
+      var upsertAll = Object.keys(catalogMap).map(function(rid) {
+        return pgPool.query(
+          "INSERT INTO catalog_products (retailer_id, name, price, availability, updated_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT (retailer_id) DO UPDATE SET name=EXCLUDED.name, price=EXCLUDED.price, availability=EXCLUDED.availability, updated_at=now()",
+          [rid, catalogMap[rid] || rid, catalogPrices[rid] || 0, catalogAvailability[rid] || "in stock"]
+        );
+      });
+      Promise.all(upsertAll)
+        .then(function() { console.error("[catalog-db] upserted " + upsertAll.length + " products to PostgreSQL"); })
+        .catch(function(e) { console.error("[catalog-db] upsert error:", e.message); });
+    }
   } catch (e) {
     console.error("[catalog-api] error:", e.message);
   }
 }
 
-// Fetch on startup, then every 5 minutes
-refreshCatalogFromAPI();
-setInterval(refreshCatalogFromAPI, 5 * 60 * 1000);
+// On startup: warm store config and catalog from PostgreSQL, then sync catalog from Meta API every 5 minutes
+warmProductCatalogCache().catch(function(e) { console.error("[store-config] startup load failed:", e.message); });
+loadCatalogFromDB()
+  .then(function() {
+    refreshCatalogFromAPI();
+    setInterval(refreshCatalogFromAPI, 5 * 60 * 1000);
+  })
+  .catch(function(e) {
+    console.error("[catalog-db] startup load failed:", e.message);
+    // Still attempt Meta sync even if DB is down
+    refreshCatalogFromAPI();
+    setInterval(refreshCatalogFromAPI, 5 * 60 * 1000);
+  });
 
 function lookupProductName(retailerId) { return catalogMap[retailerId] || retailerId; }
 function lookupProductPrice(retailerId) { return catalogPrices[retailerId] || null; }
 function lookupProductAvailability(retailerId) { return catalogAvailability[retailerId] || null; }
 
 var _productCatalogCache = null;
+// Warm store config cache from PostgreSQL store_config table on startup
+async function warmProductCatalogCache() {
+  const res = await pgPool.query("SELECT key, value FROM store_config WHERE key IN ('store_info','categories','faq')");
+  const cfg = {};
+  res.rows.forEach(function(r) { cfg[r.key] = r.value; });
+  if (!cfg.store_info) throw new Error("store_info not found in store_config table");
+  _productCatalogCache = { store: cfg.store_info, categories: cfg.categories || [], faq: cfg.faq || [], version: "pg" };
+  console.error("[store-config] loaded from PostgreSQL");
+}
 function loadProductCatalog() {
-  if (_productCatalogCache) return _productCatalogCache;
-  try {
-    _productCatalogCache = JSON.parse(require("fs").readFileSync("/docker/wa-webhook-sbsr/products.json", "utf8"));
-    return _productCatalogCache;
-  } catch (_) { return null; }
+  return _productCatalogCache;
 }
 function formatCatalogForLLM() {
   var p = loadProductCatalog();
