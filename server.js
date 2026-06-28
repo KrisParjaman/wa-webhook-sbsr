@@ -9148,6 +9148,58 @@ async function llmFirstRouter(from, text, draft) {
 // LLM-FIRST INTENT CLASSIFIER
 // ═══════════════════════════════════════════════════════════════════
 
+// ── Natural Reply Generator ────────────────────────────────────────
+// Ganti template response dengan LLM-generated conversational reply.
+// LLM tahu katalog + state + intent — tapi TIDAK hitung cart.
+async function generateClassifierReply(from, userText, intent, draft) {
+  const state = String(draft?.state || "none").trim().toLowerCase();
+  const customerName = String(draft?.customer_name || "");
+  const useCase = String(draft?.use_case || "");
+  const deliveryMode = String(draft?.delivery_mode || "");
+  const items = Array.isArray(draft?.items) ? draft.items : [];
+  const cartSummary = items.length > 0
+    ? items.map(it => (it.qty || 1) + "x " + (it.name || "?") + " (" + (it.form || "?") + ")").join(", ")
+    : "(kosong)";
+
+  const prompt = [
+    "Kamu adalah Mintu, CS ramah dari Sentuh Rasa — Risoles Otentik.",
+    "Tugasmu: balas customer dengan NATURAL, WARM, dan HELPFUL. Bukan template/robot.",
+    "",
+    "=== KONTEKS ===",
+    "State: " + state,
+    "Intent customer (dari classifier): " + intent,
+    "Nama customer: " + (customerName || "(belum diisi)"),
+    "Use case: " + (useCase || "(belum dipilih)"),
+    "Delivery: " + (deliveryMode || "(belum dipilih)"),
+    "Isi cart: " + cartSummary,
+    "",
+    "=== ATURAN PENTING ===",
+    "- JANGAN hitung total/cart/kalkulasi — sistem yang handle.",
+    "- JANGAN sebut kata 'intent', 'classifier', 'state', 'sistem'.",
+    "- Kalau state=awaiting_usecase: tanya customer mau makan langsung / frozen / meeting / gift.",
+    "- Kalau state=awaiting_product_selection: bantu customer pilih varian dari katalog.",
+    "- Kalau state=awaiting_name: minta nama penerima.",
+    "- Kalau state=awaiting_address: minta alamat lengkap.",
+    "- Kalau state=awaiting_delivery_method: suruh pilih delivery / pickup.",
+    "- JANGAN kirim katalog WA kecuali customer minta EXPLICIT.",
+    "- Kalau customer sebut produk spesifik (misal 'ayam sayur', 'smoked beef'), acknowledge dan bantu pilih form (goreng/frozen).",
+    "- Keep it short & natural (2-4 kalimat), akhiri dengan emoji 🤍",
+    "",
+    "=== PESAN CUSTOMER ===",
+    userText,
+  ].join("\n");
+
+  try {
+    const raw = await sendToOpenClaw("reply-" + Date.now() + "-" + from, prompt);
+    if (raw && String(raw).trim()) {
+      return String(raw).trim();
+    }
+  } catch (e) {
+    log("llm-reply", "generate_failed: " + (e && e.message || "?"));
+  }
+  return null;
+}
+
 function buildClassifierPrompt(from, userText, draft, bridgeContext) {
   const state = String(draft?.state || "none").trim().toLowerCase();
   const customerName = String(draft?.customer_name || "");
@@ -9334,15 +9386,17 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
         if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
           return true;
         }
-        // Kalau customer udah dalam flow (state bukan none), jangan reset ke usecase prompt.
-        // Biar existing regex/LLM pipeline yang handle — dia udah punya product selection logic.
-        if (state !== "none") {
-          log("llm-classifier", "place_order blocked — already in flow state=" + state + " — fallthrough to regex");
-          return false;
+        // LLM natural reply — tanpa auto-catalog
+        const _reply = await generateClassifierReply(from, userText, "place_order", draft);
+        if (_reply) {
+          await sendWhatsAppMessage(from, _reply);
+          log("llm-classifier", "natural_reply intent=place_order state=" + state);
+          return true;
         }
-        // Fresh start hanya untuk customer baru (state=none)
-        await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
-        await sendWhatsAppCatalog(from);
+        // Fallback: template (kalau LLM gagal)
+        if (state === "none") {
+          await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
+        }
         return true;
       }
 
