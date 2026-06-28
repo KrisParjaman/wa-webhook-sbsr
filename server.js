@@ -9322,6 +9322,13 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
         if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
           return true;
         }
+        // Kalau customer udah dalam flow (state bukan none), jangan reset ke usecase prompt.
+        // Biar existing regex/LLM pipeline yang handle — dia udah punya product selection logic.
+        if (state !== "none") {
+          log("llm-classifier", "place_order blocked — already in flow state=" + state + " — fallthrough to regex");
+          return false;
+        }
+        // Fresh start hanya untuk customer baru (state=none)
         await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
         await sendWhatsAppCatalog(from);
         return true;
