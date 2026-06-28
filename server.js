@@ -4709,7 +4709,7 @@ async function sendSbsrDeliveryMethodButtons(from) {
 const SBSR_USECASE_INTENTS = [
   {
     id: "makan-langsung",
-    match: /\b(?:makan\s+langsung|siap\s+makan|langsung\s+dimakan|buat\s+dimakan\s+sekarang|buat\s+snack\s+langsung)\b/i,
+    match: /\b(?:makan\s+langsung|makan\s+di\s+tempat|siap\s+makan|siap\s+d(?:i|i)\s*makan|langsung\s+d(?:i|i)\s*makan|dimakan\s+langsung|buat\s+d(?:i|i)\s*makan\s+sekarang|buat\s+snack\s+langsung|langsung\s+makan|goreng\s+aja|goreng\s+ya|goreng\s+kak)\b/i,
     reply: `Kalau untuk makan langsung, Mintu rekomendasiin risoles goreng ya Kak 🤍
 
 Pilihan favorit (bisa mix varian):
@@ -9172,6 +9172,7 @@ async function generateClassifierReply(from, userText, intent, draft) {
     "Use case: " + (useCase || "(belum dipilih)"),
     "Delivery: " + (deliveryMode || "(belum dipilih)"),
     "Isi cart: " + cartSummary,
+    "Pending items (customer udah sebut tapi belum dikonfirmasi): " + JSON.stringify(draft?.pending_items || []),
     "",
     "=== ATURAN PENTING ===",
     "- JANGAN hitung total/cart/kalkulasi — sistem yang handle.",
@@ -9183,6 +9184,8 @@ async function generateClassifierReply(from, userText, intent, draft) {
     "- Kalau state=awaiting_delivery_method: suruh pilih delivery / pickup.",
     "- JANGAN kirim katalog WA kecuali customer minta EXPLICIT.",
     "- Kalau customer sebut produk spesifik (misal 'ayam sayur', 'smoked beef'), acknowledge dan bantu pilih form (goreng/frozen).",
+    "- Kalau ada pending_items: SEBUTKAN itemnya dan TANYA apakah sudah benar. JANGAN tawarin ulang semua produk.",
+    "- Kalau customer pilih usecase (makan langsung/frozen) + ada pending_items: KONFIRMASI pesanan dan ARAHKAN ke 'Ya, lanjut pesan'.",
     "- Keep it short & natural (2-4 kalimat), akhiri dengan emoji 🤍",
     "",
     "=== EKSTRAK ITEM (kalau customer sebut produk + quantity) ===",
@@ -9503,6 +9506,13 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
         if (typeof tryHandleFrozenCourierChoice === "function" && await tryHandleFrozenCourierChoice(from, userText)) return true;
         if (typeof tryHandlePickupFlow === "function" && await tryHandlePickupFlow(from, userText)) return true;
         if (await tryHandleAddressPinConfirm(from, userText)) return true;
+        // No handler matched — use natural reply instead of falling to OOC LLM
+        const _coReply = await generateClassifierReply(from, userText, "choose_option", draft);
+        if (_coReply && _coReply.reply) {
+          await sendWhatsAppMessage(from, _coReply.reply);
+          log("llm-classifier", "natural_reply intent=choose_option state=" + state);
+          return true;
+        }
         return false;
       }
 
