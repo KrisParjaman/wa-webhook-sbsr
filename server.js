@@ -9398,6 +9398,14 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
 
       case "ask_question": {
         if (typeof tryHandleFaq === "function" && await tryHandleFaq(from, userText)) return true;
+        // Quick-help: jawab pertanyaan umum langsung tanpa OOC LLM
+        // (berguna saat FAQ di-block oleh checkout state)
+        const _aq = String(userText || "").trim().toLowerCase();
+        if (/\b(?:cara|gimana|bagaimana)\b.*\b(?:share|kirim|ngirim)\s*(?:lokasi|location|titik|pin)\b/i.test(_aq) ||
+            /\b(?:share|kirim|ngirim)\s*(?:lokasi|location|titik|pin)\b.*\b(?:cara|gimana|bagaimana)\b/i.test(_aq)) {
+          await sendWhatsAppMessage(from, "Gampang Kak! Tinggal tap tombol *Send Location* atau ikon 📎 (lampiran) > pilih *Location* > kirim titik lokasi Kakak 🤍");
+          return true;
+        }
         return false;
       }
 
