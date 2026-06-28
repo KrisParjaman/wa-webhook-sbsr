@@ -15,6 +15,7 @@ let catalogManager = null;
 let paymentEngine = null;
 let draftStore = null;
 let gsheetSync = null;
+let stateManager = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -23,6 +24,7 @@ try {
   paymentEngine = require("./lib/payment-engine.cjs");
   draftStore = require("./lib/draft-store.cjs");
   gsheetSync = require("./lib/gsheet-sync.cjs");
+  stateManager = require("./lib/state-manager.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -5075,169 +5077,8 @@ function isCheckoutActiveState(state) {
     "awaiting_manual_payment_review","awaiting_address","awaiting_location","awaiting_usecase","awaiting_product_selection","awaiting_order_confirm"
   ].includes(s);
 }
-function clearSbsrCheckoutForCancel(from) {
-  const draft = loadSbsrDraft(from) || { phone: from };
-  const next = {
-    ...draft,
-    state: null,
-    use_case: null,
-    use_case_source: null,
-    use_case_set_at: null,
-    items: null,
-    addons: null,
-    subtotal: null,
-    cart: null,
-    destination: null,
-    gmaps_link: null,
-    pending_address_text: null,
-    pending_address_text_at: null,
-    grand_total: null,
-    expected_total: null,
-    ongkir: null,
-    courier: null,
-    courier_label: null,
-    courier_type: null,
-    eta_text: null,
-    quote_at: null,
-    invoice_sent_at: null,
-    payment_sent_at: null,
-    payment_order_key: null,
-    payment_text_sent_at: null,
-    qris_sent_for_order_key: null,
-    add_more_mode: null,
-    awaiting_add_more_confirm: null,
-    pending_bridge_context: null,
-  };
-  saveSbsrDraft(from, next);
-  return true;
-}
-function isProtectedPaymentFlowDraft(draft) {
-  const d = draft || {};
-  const state = String(d.state || "").trim().toLowerCase();
-  const terminal = new Set(["approved", "booked", "delivered", "cancelled", "payment_verified_manual", "payment_rejected_manual"]);
-  if (SBSR_MENU_PROTECTED_STATES.has(state)) return true;
-  if (d.payment_sent_at && !terminal.has(state)) return true;
-  return false;
-}
 
-function resetSbsrCheckoutState(from) {
-  const draft = loadSbsrDraft(from) || { phone: from };
-  const state = String(draft.state || "").trim().toLowerCase();
-  if (!SBSR_TRANSIENT_RESET_STATES.has(state)) return false;
-  // Safety: jangan nuke cart aktif. User cuma greeting ("hi"/"halo"). Reset eksplisit dihandle SBSR_MANUAL_RESET_RE.
-  if (Array.isArray(draft.items) && draft.items.length > 0) return false;
-  const next = {
-    ...draft,
-    state: null,
-    use_case: null,
-    use_case_source: null,
-    use_case_set_at: null,
-    items: null,
-    addons: null,
-    subtotal: null,
-    cart: null,
-    cart_source: null,
-    cart_raw_text: null,
-    cart_parsed_at: null,
-    cart_sniffed_at: null,
-    catalog_order: null,
-    destination: null,
-    gmaps_link: null,
-    gmaps_link_seen_at: null,
-    pending_address_text: null,
-    pending_address_text_at: null,
-    customer_name: null,
-    customer_name_set_at: null,
-    grand_total: null,
-    expected_total: null,
-    ongkir: null,
-    courier: null,
-    courier_label: null,
-    courier_type: null,
-    eta_text: null,
-    quote_at: null,
-    invoice_sent_at: null,
-    payment_sent_at: null,
-    pending_bridge_context: null,
-    location_resolve_fails: 0,
-  };
-  saveSbsrDraft(from, next);
-  log("sbsr-session", "reset_checkout_state");
-  return true;
-}
 
-function hardResetSbsrSession(from) {
-  const draft = loadSbsrDraft(from) || { phone: from };
-  const next = {
-    ...draft,
-    state: null,
-    awaiting_question_at: null,
-    use_case: null,
-    use_case_source: null,
-    use_case_set_at: null,
-    inferred_product_mode: null,
-    items: null,
-    addons: null,
-    subtotal: null,
-    cart: null,
-    cart_source: null,
-    cart_raw_text: null,
-    cart_parsed_at: null,
-    cart_sniffed_at: null,
-    catalog_order: null,
-    delivery_mode: null,
-    delivery_mode_set_at: null,
-    destination: null,
-    gmaps_link: null,
-    gmaps_link_seen_at: null,
-    pending_address_text: null,
-    pending_address_text_at: null,
-    address_text: null,
-    quote_at: null,
-    quote_cache: null,
-    quote_options: null,
-    grand_total: null,
-    expected_total: null,
-    ongkir: null,
-    courier: null,
-    courier_choice: null,
-    courier_label: null,
-    courier_type: null,
-    eta_text: null,
-    invoice_sent_at: null,
-    pending_invoice: null,
-    payment_sent_at: null,
-    payment_instruction_text: null,
-    pending_payment_review: null,
-    payment_review_state: null,
-    payment_match_status: null,
-    payment_review_requested_at: null,
-    payment_review_resolved_at: null,
-    payment_review_resolved_by: null,
-    bukti_url: null,
-    bukti_amount: null,
-    bukti_bank: null,
-    bukti_mismatch_at: null,
-    address_pin_confirm: null,
-    pending_bridge_context: null,
-    pending_menu_prompt: null,
-    pending_usecase_prompt: null,
-    pending_use_case_reminder: null,
-    pending_product_reminder: null,
-    pending_frozen_reminder: null,
-    menu_interrupt_pending: null,
-    location_resolve_fails: 0,
-    location_admin_notified_at: null,
-    last_failed_url: null,
-    pin_confirmed_at: null,
-    addon_phase: null,
-    addon_offer_at: null,
-    addon_selected_at: null,
-    addon_skipped_at: null,
-    addon_last_reply: null,
-  };
-  saveSbsrDraft(from, next);
-}
 
 function getSbsrPickupDetailMessage() {
   return [
@@ -6667,6 +6508,10 @@ function _initEngine() {
     getPrices: function() { return catalogPrices; },
     getAvailability: function() { return catalogAvailability; },
     log: log,
+  });
+  // Init state-manager
+  if (stateManager) stateManager.init({
+    loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, log: log,
   });
   // Init gsheet-sync
   if (gsheetSync) gsheetSync.init({
@@ -8784,6 +8629,12 @@ function formatFaqForLLM() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// ── State manager delegations ─────────────────────────────────────
+function clearSbsrCheckoutForCancel(f){return stateManager?stateManager.clearCheckoutForCancel(f):false}
+function isProtectedPaymentFlowDraft(d){return stateManager?stateManager.isProtectedPaymentFlow(d):false}
+function resetSbsrCheckoutState(f){return stateManager?stateManager.resetCheckoutState(f):false}
+function hardResetSbsrSession(f){return stateManager?stateManager.hardResetSession(f):true}
+
 // STUBS — deleted functions (migrated to pipeline v2 ctx handlers)
 // These stubs keep existing call sites safe. All return false/void.
 // Remove after pipeline v2 is production-verified.
