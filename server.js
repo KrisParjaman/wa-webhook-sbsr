@@ -9968,9 +9968,10 @@ async function handleMessage(msg, contacts) {
           sendReaction(from, messageId, "").catch(() => {});
           return;
         }
-        log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
+      }
 
       // === LLM-FIRST INTENT CLASSIFIER =================================
+      // Jalan untuk SEMUA pesan (bukan cuma active checkout).
       // 3 jalur berdasarkan confidence:
       //   high   → route ke template handler → return
       //   medium → LLM tanya balik (clarification) → return, tunggu jawaban
@@ -10026,6 +10027,10 @@ async function handleMessage(msg, contacts) {
       }
       // === END LLM-FIRST INTENT CLASSIFIER =============================
 
+      // LLM-FIRST GUARD: during active checkout, let LLM handle ALL conversation
+      // Bridge only handles structured inputs (interactive replies, location, address parse)
+      if (_activeCheckoutForMenu) {
+        log("sbsr-llm-first-guard", "active checkout, skipping content interceptors");
       } else if (isMenuIntent(userText)) {
         log("sbsr-menu-interrupt", "detected");
         if (isProtectedPaymentFlowDraft(_preDraftForMenu)) {
