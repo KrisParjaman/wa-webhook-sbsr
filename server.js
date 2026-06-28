@@ -1357,7 +1357,7 @@ function _pruneProcessedIds() {
 }
 function shouldDedupeMessageId(messageId) {
   if (!messageId) return false;
-  if (process.env.SBSR_IDEMPOTENT !== 'true') return false;
+  if (process.env.SBSR_IDEMPOTENT === 'false') return false; // dedup ON by default
   if (PROCESSED_MSG_IDS.size > PROCESSED_MSG_MAX) _pruneProcessedIds();
   const seen = PROCESSED_MSG_IDS.get(messageId);
   if (seen && (Date.now() - seen) < PROCESSED_MSG_TTL_MS) return true;
