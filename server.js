@@ -9402,6 +9402,14 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       case "add_more": {
         const d = loadSbsrDraft(from) || {};
         if (!Array.isArray(d.items) || d.items.length === 0) {
+          // Kalau udah dalam flow (state bukan none), jangan reset ke usecase.
+          // Biar existing pipeline yang handle — bisa jadi customer belum
+          // finalisasi order pertama dan ini sebenernya product selection.
+          if (state !== "none") {
+            log("llm-classifier", "add_more blocked — no items yet, in flow state=" + state + " — fallthrough to regex");
+            return false;
+          }
+          // Fresh customer: start dari awal
           await sendSbsrUseCasePrompt(from, { phone: from });
           await sendWhatsAppCatalog(from);
           return true;
@@ -9418,6 +9426,13 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       case "change_order": {
         const d = loadSbsrDraft(from) || {};
         if (!Array.isArray(d.items) || d.items.length === 0) {
+          // Kalau udah dalam flow, jangan block — biar pipeline handle natural.
+          // Customer mungkin lagi pilih produk dan "ganti varian" = ganti pilihan.
+          if (state !== "none") {
+            log("llm-classifier", "change_order blocked — no items yet, in flow state=" + state + " — fallthrough to regex");
+            return false;
+          }
+          // Fresh customer: kasih tau belum ada pesanan
           await sendWhatsAppMessage(from, "Kak, belum ada pesanan yang bisa diubah. Ketik *MENU* untuk mulai order ya \u{1f90d}");
           return true;
         }
