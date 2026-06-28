@@ -2167,7 +2167,7 @@ const SBSR_DRAFTS_DIR = process.env.SBSR_DRAFTS_DIR || "/opt/sbsr/data/openclaw/
 // Multi-word affirmative: leading OK-keyword + optional trailing affirmation/filler words.
 // Matches: "ok", "ya", "ok bener", "ya bener kak", "siap lanjut", "ok deal", "bener kak", "ok aja".
 // Rejects: "ok tapi tunggu", "ya tolong ganti" — anything with non-affirmation words after.
-const SBSR_OK_RE = /^(?:ok|oke|okay|okey|yes|y|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|udah|dah|👍|🤍)(?:[\s,.]+(?:ok|oke|okay|okey|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|udah|dah|kak|kakak|aja|deh|nih|lah|dong|sih))*\s*[.!,?]*\s*$/i;
+const SBSR_OK_RE = /^(?:ok|oke|okay|okey|yes|y|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|betul|udah|dah|fix|👍|🤍)(?:[\s,.]+(?:ok|oke|okay|okey|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|betul|udah|dah|fix|kak|kakak|aja|deh|nih|lah|dong|sih|sudah))*\s*[.!,?]*\s*$/i;
 
 function loadSbsrDraft(phoneRaw) {
   try {
@@ -10300,27 +10300,34 @@ async function handleMessage(msg, contacts) {
           sendReaction(from, messageId, "").catch(() => {});
           return;
         }
-        // No items in draft — try pending_order_summary from LLM reply
+        // No items in draft — try pending_items (from classifier) or summary
+        let _pendingItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
         const _summary = _bd.pending_order_summary || '';
-        if (_summary) {
+        if (_pendingItems.length > 0 || _summary) {
           // Parse price from summary: "totalnya Rp110.000" or "Rp110.000 ya"
           const _priceM = _summary.match(/Rp\s*([\d.]+)/);
           const _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
-          // Detect pack size: "Mix 6 pcs" → 6, atau hitung semua "Xpcs" mentions
-          const _mixM = _summary.match(/Mix\s+(\d+)\s*pcs/i);
+          // Detect pack size — use pending_items if available (more reliable)
           let _pack;
-          if (_mixM) {
-            _pack = parseInt(_mixM[1], 10);
+          if (_pendingItems.length > 0) {
+            _pack = _pendingItems.reduce((sum, it) => sum + (Number(it.qty) || 1), 0);
+            log('sbsr-interactive', 'ya_lanjut -> using pending_items total_pcs=' + _pack);
           } else {
-            // Count all "X pcs" (e.g. "Ayam Sayur 3pcs + Ragout 3pcs" → 6)
-            const _pcsRe = /(\d+)\s*pcs/gi;
-            let _total = 0, _m;
-            while ((_m = _pcsRe.exec(_summary)) !== null) {
-              _total += parseInt(_m[1], 10);
+            // Fallback: count pcs from summary (only up to first "Harga"/price line)
+            const _summaryHead = _summary.split(/\b(?:Harga|price|list|Rp\s*\d)/i)[0];
+            const _mixM = _summaryHead.match(/Mix\s+(\d+)\s*pcs/i);
+            if (_mixM) {
+              _pack = parseInt(_mixM[1], 10);
+            } else {
+              const _pcsRe = /(\d+)\s*pcs/gi;
+              let _total = 0, _m;
+              while ((_m = _pcsRe.exec(_summaryHead)) !== null) {
+                _total += parseInt(_m[1], 10);
+              }
+              _pack = _total > 0 ? _total : 6;
             }
-            _pack = _total > 0 ? _total : 6; // default 6 (minimum order)
           }
-          // Determine form: "Frozen" → frozen, else goreng
+          // Determine form
           const _form = /frozen/i.test(_summary) ? 'frozen' : 'goreng';
           const _name = 'Risol ' + (_form === 'frozen' ? 'Frozen' : 'Goreng') + ' — Mix ' + _pack + 'pcs';
           saveSbsrDraft(from, {
@@ -10328,9 +10335,10 @@ async function handleMessage(msg, contacts) {
             items: [{ name: _name, qty: 1, pack_size: _pack, unit_price: _price, form: _form }],
             subtotal: _price,
             pending_order_summary: null,
+            pending_items: null,
             state: 'awaiting_delivery_method',
           });
-          log('sbsr-interactive', 'ya_lanjut -> created draft from summary price=' + _price + ' pack=' + _pack);
+          log('sbsr-interactive', 'ya_lanjut -> created draft price=' + _price + ' pack=' + _pack + ( _pendingItems.length > 0 ? ' (from pending_items)' : ' (from summary)'));
           await sendSbsrDeliveryMethodButtons(from);
           sendReaction(from, messageId, '').catch(() => {});
           return;
