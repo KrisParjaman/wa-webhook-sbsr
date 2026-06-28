@@ -13,12 +13,14 @@ let enginePipeline = null;
 let waSender = null;
 let catalogManager = null;
 let paymentEngine = null;
+let draftStore = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
   waSender = require("./lib/wa-sender.cjs");
   catalogManager = require("./lib/catalog-manager.cjs");
   paymentEngine = require("./lib/payment-engine.cjs");
+  draftStore = require("./lib/draft-store.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -1865,55 +1867,11 @@ const SBSR_DRAFTS_DIR = process.env.SBSR_DRAFTS_DIR || "/opt/sbsr/data/openclaw/
 // Rejects: "ok tapi tunggu", "ya tolong ganti" — anything with non-affirmation words after.
 const SBSR_OK_RE = /^(?:ok|oke|okay|okey|yes|y|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|betul|udah|dah|fix|👍|🤍)(?:[\s,.]+(?:ok|oke|okay|okey|ya|sip|siap|setuju|lanjut|gas|deal|gpp|bener|benar|betul|udah|dah|fix|kak|kakak|aja|deh|nih|lah|dong|sih|sudah))*\s*[.!,?]*\s*$/i;
 
-function loadSbsrDraft(phoneRaw) {
-  try {
-    const norm = String(phoneRaw).replace(/[^0-9]/g, "").replace(/^62/, "0");
-    const f = path.join(SBSR_DRAFTS_DIR, norm + ".json");
-    if (!fs.existsSync(f)) return null;
-    return JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) { log("sbsr-draft", "load err: " + e.message); return null; }
-}
-
-function sbsrDraftPath(phoneRaw) {
-  const norm = String(phoneRaw).replace(/[^0-9]/g, "").replace(/^62/, "0");
-  return path.join(SBSR_DRAFTS_DIR, norm + ".json");
-}
-function saveSbsrDraft(phoneRaw, draft) {
-  try {
-    if (!fs.existsSync(SBSR_DRAFTS_DIR)) fs.mkdirSync(SBSR_DRAFTS_DIR, { recursive: true });
-    const norm = String(phoneRaw).replace(/[^0-9]/g, "").replace(/^62/, "0");
-    fs.writeFileSync(path.join(SBSR_DRAFTS_DIR, norm + ".json"),
-      JSON.stringify({ ...draft, phone: norm, updated_at: new Date().toISOString() }, null, 2));
-  } catch (e) { log("sbsr-draft", "save err: " + e.message); }
-}
-
-// =====================================================
-// Bridge ↔ LLM context sync
-// =====================================================
-// When a tryHandle* interceptor responds to the customer DETERMINISTICALLY
-// (skipping LLM via `return true`), OpenClaw's session has zero record of
-// what the bridge said. The next customer message hits the LLM with stale
-// context → it re-asks for info already provided, or fabricates progress
-// ("invoice udah dikirim" when no invoice exists).
-//
-// Fix: every interceptor that replies to the customer also writes a
-// `pending_bridge_context` field into the draft. On the next user message
-// that goes to OpenClaw, handleMessage prepends that block to the user's
-// text inside a [CONTEXT] frame and clears it. The LLM then knows what the
-// bridge already did and what the next expected step is.
-function setPendingBridgeContext(phoneRaw, contextBlock) {
-  if (!contextBlock) return;
-  const draft = loadSbsrDraft(phoneRaw) || { phone: phoneRaw };
-  saveSbsrDraft(phoneRaw, { ...draft, pending_bridge_context: contextBlock });
-}
-
-function consumePendingBridgeContext(phoneRaw) {
-  const draft = loadSbsrDraft(phoneRaw);
-  if (!draft || !draft.pending_bridge_context) return null;
-  const ctx = draft.pending_bridge_context;
-  saveSbsrDraft(phoneRaw, { ...draft, pending_bridge_context: null });
-  return ctx;
-}
+function loadSbsrDraft(phoneRaw) { return (draftStore && draftStore.load(phoneRaw)) || null; }
+function sbsrDraftPath(phoneRaw) { return draftStore ? draftStore.draftPath(phoneRaw) : ''; }
+function saveSbsrDraft(phoneRaw, draft) { if (draftStore) draftStore.save(phoneRaw, draft); }
+function setPendingBridgeContext(phoneRaw, ctx) { if (draftStore) draftStore.setPendingBridgeContext(phoneRaw, ctx); }
+function consumePendingBridgeContext(phoneRaw) { return draftStore ? draftStore.consumePendingBridgeContext(phoneRaw) : null; }
 
 function fmtRupiah(n) {
   return "Rp " + (Number(n) || 0).toLocaleString("id-ID");
@@ -1941,21 +1899,8 @@ const SBSR_CHECKOUT_LOCK_STATES = new Set([
 ]);
 const SBSR_CHECKOUT_ENGLISH_GUARD_RE = /(Thanks,|Give me just a moment|Okay, final details|Sudah termasuk pajak|NO_REPLY|bridge will handle|awaiting the image|payment confirmation|interactive WhatsApp catalog|waiting for customer)/i;
 
-function sbsrDraftHasDestination(draft) {
-  const dest = draft && draft.destination;
-  if (!dest) return false;
-  const lat = Number(dest.lat);
-  const lng = Number(dest.lng);
-  return (Number.isFinite(lat) && Number.isFinite(lng)) || !!dest.postal_code;
-}
-
-function isSbsrCheckoutCollectionActive(draft) {
-  if (!draft || !Array.isArray(draft.items) || draft.items.length === 0) return false;
-  const s = String(draft.state || "").trim().toLowerCase();
-  if (SBSR_CHECKOUT_LOCK_STATES.has(s)) return false;
-  if (SBSR_CHECKOUT_COLLECTION_STATES.has(s)) return true;
-  return !draft.invoice_sent_at;
-}
+function sbsrDraftHasDestination(draft) { return draftStore ? draftStore.hasDestination(draft) : false; }
+function isSbsrCheckoutCollectionActive(draft) { return draftStore ? draftStore.isCheckoutActive(draft) : false; }
 
 
 // === OOC HANDLER V3: handle out-of-context questions during checkout ===
