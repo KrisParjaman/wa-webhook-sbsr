@@ -64,6 +64,47 @@ if (SBSR_PAUSE) {
 }
 // --- END BIKS SECURITY HARDENING ---
 
+// ── Address Matcher ─────────────────────────────────────────────────
+// Extracted from inline → lib/address-matcher.cjs.
+// Fail-open: if module can't be loaded, fall back to no-op stubs so
+// the bridge never goes down on an address-matching failure.
+let am = null;
+let normalizeSpaces, hasWestJavaHint, hasJakartaHint, isJakartaLikeHint,
+    extractRegionKeywords, regionSetsConflict, inferRegionFromCoords,
+    extractDistrictFromText, extractSemanticRegion,
+    callLlmAddr, callLlmRegion, callLlmDistrict, callLlmCompare,
+    hasSemanticRegionConflict, hasTextOnlyDistrictMismatch;
+try {
+  am = require("./lib/address-matcher.cjs");
+  ({
+    normalizeSpaces, hasWestJavaHint, hasJakartaHint, isJakartaLikeHint,
+    extractRegionKeywords, regionSetsConflict, inferRegionFromCoords,
+    extractDistrictFromText, extractSemanticRegion,
+    callLlmAddr, callLlmRegion, callLlmDistrict, callLlmCompare,
+    hasSemanticRegionConflict, hasTextOnlyDistrictMismatch,
+  } = am);
+  console.log("[address-matcher] lib loaded");
+} catch (e) {
+  console.error("[address-matcher] lib failed — using no-op stubs:", e.message);
+  // pure fallbacks
+  normalizeSpaces = function(s) { return String(s || "").trim().replace(/[\s ]+/g, " "); };
+  hasWestJavaHint = function() { return false; };
+  hasJakartaHint = function() { return false; };
+  isJakartaLikeHint = function() { return false; };
+  extractRegionKeywords = function() { return new Set(); };
+  regionSetsConflict = function() { return false; };
+  inferRegionFromCoords = function() { return null; };
+  extractDistrictFromText = function() { return ""; };
+  // async LLM-dependent stubs
+  extractSemanticRegion = async function() { return null; };
+  callLlmAddr = async function() { return null; };
+  callLlmRegion = async function() { return null; };
+  callLlmDistrict = async function() { return ""; };
+  callLlmCompare = async function() { return null; };
+  hasSemanticRegionConflict = async function() { return false; };
+  hasTextOnlyDistrictMismatch = async function() { return false; };
+}
+
 const app = express();
 const PORT = 3001;
 
@@ -1033,6 +1074,8 @@ function sendToOpenClaw(phoneNumber, message) {
     log("chat", "Sent to whatsapp:" + phoneNumber + " text=" + (typeof message === "string" ? message.slice(0,200) : JSON.stringify(message).slice(0,200)));
   });
 }
+// Inject sendToOpenClaw into lib modules that need it for LLM fallback
+if (am) am.init(sendToOpenClaw);
 
 // --- Download WhatsApp media ---
 async function downloadWhatsAppMedia(mediaId) {
@@ -2533,9 +2576,6 @@ function decodeMapsPlaceFromUrlBridge(inputUrl) {
     return null;
   }
 }
-function normalizeSpaces(s) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
 function buildPlaceGeocodeCandidates(place) {
   const base = normalizeSpaces(place);
   if (!base) return [];
@@ -2592,166 +2632,6 @@ function buildPlaceGeocodeCandidates(place) {
     log("gmaps-normalize", `candidate[${i}]=${filtered[i]}`);
   }
   return filtered;
-}
-function hasWestJavaHint(text) {
-  const t = String(text || "").toLowerCase();
-  return /(sumedang|bandung|cimanggung|jawa barat)/i.test(t);
-}
-function hasJakartaHint(text) {
-  const t = String(text || "").toLowerCase();
-  return /(jakarta|jakarta timur|jaktim|cipinang|bassura|indonesia)/i.test(t);
-}
-async function extractSemanticRegion(text, useLlmFallback) {
-  const t = String(text || "").toLowerCase();
-  if (!t) return null;
-  // Deterministic matching first
-  if (/(jakarta|jaktim|jakarta timur|jakarta barat|jakarta selatan|jakarta utara|jakarta pusat|dki|ibu kota)/i.test(t)) {
-    return "jakarta";
-  }
-  if (/(sumedang|cimanggung|bandung|jawa barat|jabar|kabupaten bandung|kota bandung|ciwidey|soreang)/i.test(t)) {
-    return "jawa_barat";
-  }
-  if (/(bekasi|kota bekasi|kabupaten bekasi|cikarang|mustika jaya|bantar gebang)/i.test(t)) {
-    return "bekasi";
-  }
-  if (/(depok|kota depok|pancoran mas|sukmajaya|beji|cimanggis|sawangan|limo)/i.test(t)) {
-    return "depok";
-  }
-  if (/(tangerang|kota tangerang|kabupaten tangerang|tangerang selatan|tangsel|pamulang|ciputat|serpong|bintaro|bsd)/i.test(t)) {
-    return "tangerang";
-  }
-  if (/(bogor|kota bogor|kabupaten bogor|cibinong|gunung putri|citeureup|cileungsi|sukaraja)/i.test(t)) {
-    return "bogor";
-  }
-  if (/(banten)/i.test(t)) {
-    return "banten";
-  }
-  // LLM fallback: jika deterministic tidak dapat menentukan
-  if (useLlmFallback !== false) {
-    try {
-      const llmRegion = await callLlmRegion(text);
-      if (llmRegion) return llmRegion;
-    } catch(e) {}
-  }
-  return null;
-}
-function extractRegionKeywords(text) {
-  const t = String(text || "").toLowerCase();
-  const out = new Set();
-  if (!t) return out;
-  if (/(jakarta timur|jaktim|jatinegara|cipinang|dki jakarta|jakarta)/i.test(t)) out.add("jakarta");
-  if (/(bandung|sumedang|cimanggung|jawa barat|jabar|bekasi|depok)/i.test(t)) out.add("jawa_barat");
-  if (/(tangerang|banten)/i.test(t)) out.add("banten");
-  return out;
-}
-function regionSetsConflict(aSet, bSet) {
-  if (!aSet || !bSet || aSet.size === 0 || bSet.size === 0) return false;
-  for (const x of aSet) if (bSet.has(x)) return false;
-  return true;
-}
-function inferRegionFromCoords(lat, lng) {
-  const la = Number(lat), lo = Number(lng);
-  if (!Number.isFinite(la) || !Number.isFinite(lo)) return null;
-  // Rough Jakarta/Jabodetabek envelope
-  if (la >= -6.45 && la <= -6.00 && lo >= 106.55 && lo <= 107.15) return "jakarta";
-  // Rough Bandung/Sumedang/Jawa Barat belt often seen in wrong pins
-  if (la >= -7.35 && la <= -6.50 && lo >= 107.20 && lo <= 108.20) return "jawa_barat";
-  return null;
-}
-
-// LLM fallback for address matching - called when deterministic fails
-// Uses existing OpenClaw WebSocket to send utility prompts
-async function callLlmAddr(prompt, mode) {
-  if (!prompt || prompt.length < 5) return mode === 'region' ? null : '';
-  try {
-    const reply = await sendToOpenClaw('llm-addr-' + Date.now(), prompt);
-    const cleaned = (reply || '').trim().toLowerCase();
-    if (mode === 'region') {
-      if (['jakarta','bekasi','depok','tangerang','bogor','jawa_barat','banten'].includes(cleaned)) return cleaned;
-      // Try to extract region name from longer response
-      for (const r of ['jakarta','bekasi','depok','tangerang','bogor','jawa_barat','banten']) {
-        if (cleaned.includes(r)) return r;
-      }
-      return null;
-    }
-    if (mode === 'district') return cleaned || '';
-    if (mode === 'compare') {
-      if (cleaned.includes('sama')) return false;
-      if (cleaned.includes('beda') || cleaned.includes('berbeda')) return true;
-      return null;
-    }
-    return null;
-  } catch(e) {
-    return mode === 'region' ? null : '';
-  }
-}
-async function callLlmRegion(text) { return callLlmAddr(text, 'region'); }
-async function callLlmDistrict(text) { return callLlmAddr(text, 'district'); }
-async function callLlmCompare(a, b) { return callLlmAddr('Bandingkan: apakah alamat 1 dan 2 di KOTA yang SAMA atau BERBEDA? Jawab SAMA/BERBEDA saja.\n1: ' + a.substring(0, 150) + '\n2: ' + b.substring(0, 150), 'compare'); }
-
-function extractDistrictFromText(text) {
-  const t = String(text || "").toLowerCase();
-  if (!t) return "";
-  const mKec = t.match(/\b(?:kecamatan|kec\.?)\s*([a-z\s-]{3,40})/i);
-  if (mKec && mKec[1]) return normalizeSpaces(mKec[1]).toLowerCase();
-  // Jakarta districts (complete list)
-  const known = [
-    "jatinegara","tebet","duren sawit","matraman","cakung","pulogadung","cipayung","kramat jati",
-    "johar baru","menteng","setiabudi","pancoran","mampang","pasar minggu","kebayoran","cilandak",
-    "tanjung priok","koja","kelapa gading","cilincing","pademangan","penjaringan",
-    "kemayoran","sawah besar","gambir","senen","cempaka putih","tanah abang",
-    "palmerah","grogol petamburan","tambora","taman sari","kebon jeruk","kembangan",
-    "pesanggrahan","cilodong","makasar","pasar rebo","ciracas","halim perdanakusuma",
-    "kepulauan seribu selatan","kepulauan seribu utara",
-    // Bekasi districts
-    "mustika jaya","bantar gebang","jatiasih","jatibening","bekasi timur","bekasi barat","bekasi selatan","bekasi utara",
-    "rawa lumbu","medan satria","pondok melati","pondok gede",
-    // Depok districts
-    "pancoran mas","sukmajaya","beji","cimanggis","sawangan","limo","tapos","cinere","cilodong",
-    // Tangerang districts
-    "pamulang","ciputat","ciputat timur","serpong","serpong utara","bintaro","pondok aren",
-    "karang tengah","larangan","pinang","ciledug","karawaci","periuk","cibodas",
-    // Bogor districts
-    "cibinong","gunung putri","citeureup","cileungsi","sukaraja","babakan madang",
-  ];
-  for (const d of known) if (new RegExp(`\\b${d}\\b`, "i").test(t)) return d;
-  return "";
-}
-async function hasSemanticRegionConflict(addressText, decodedPlace) {
-  const a = await extractSemanticRegion(addressText);
-  const b = await extractSemanticRegion(decodedPlace);
-  if (!a || !b) {
-    // LLM fallback: jika salah satu tidak terdeteksi deterministic
-    if (a !== null || b !== null) {
-      try {
-        const llmResult = await callLlmCompare(addressText, decodedPlace);
-        if (llmResult !== null) return llmResult;
-      } catch(e) {}
-    }
-    return false;
-  }
-  if (a !== b) return true;
-  return false;
-}
-async function hasTextOnlyDistrictMismatch(addressText, decodedPlace) {
-  const aDist = extractDistrictFromText(addressText);
-  const bDist = extractDistrictFromText(decodedPlace);
-  const aReg = await extractSemanticRegion(addressText);
-  const bReg = await extractSemanticRegion(decodedPlace);
-  if (aReg && bReg && aReg !== bReg) return true;
-  if (aDist && bDist && aDist !== bDist) return true;
-  // LLM fallback: jika deterministic tidak mendeteksi perbedaan
-  if (!aReg && !bReg && !aDist && !bDist) {
-    try {
-      const llmResult = await callLlmCompare(addressText, decodedPlace);
-      if (llmResult === true) return true;
-    } catch(e) {}
-  }
-  return false;
-}
-function isJakartaLikeHint(text) {
-  const t = String(text || "").toLowerCase();
-  return /(jakarta|jaktim|jakarta timur|cipinang|bassura|indonesia|\bid\b)/i.test(t);
 }
 async function geocodeMapsPlaceBridge(place, finalUrl, sourceType = "") {
   if (!place) return null;
