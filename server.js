@@ -2220,7 +2220,7 @@ async function tryHandleIgPost(phone, userText) {
 // --- Process incoming message ---
 
 // =====================================================
-// #2 Bridge-level inbound dedup — gated by SBSR_IDEMPOTENT=true (default OFF)
+// #2 Bridge-level inbound dedup — ON by default; set SBSR_IDEMPOTENT=false to disable
 // =====================================================
 // Catches Meta webhook retries: when bridge takes >5s to ACK, Meta resends the
 // same message_id; without dedup, handleMessage would fire twice and any
@@ -2235,7 +2235,7 @@ function _pruneProcessedIds() {
 }
 function shouldDedupeMessageId(messageId) {
   if (!messageId) return false;
-  if (process.env.SBSR_IDEMPOTENT !== 'true') return false;
+  if (process.env.SBSR_IDEMPOTENT === 'false') return false;  // opt-out to disable
   if (PROCESSED_MSG_IDS.size > PROCESSED_MSG_MAX) _pruneProcessedIds();
   const seen = PROCESSED_MSG_IDS.get(messageId);
   if (seen && (Date.now() - seen) < PROCESSED_MSG_TTL_MS) return true;
@@ -9788,7 +9788,7 @@ async function handleMessage(msg, contacts) {
   const messageId = msg.id;
   const contactName = contacts?.[0]?.profile?.name || from;
 
-  // #2 — drop duplicate message_ids (Meta webhook retry within 60s) when SBSR_IDEMPOTENT=true
+  // #2 — drop duplicate message_ids (Meta webhook retry within 60s); dedup ON by default
   if (shouldDedupeMessageId(messageId)) {
     log('idempotent', 'dup message_id within 60s — skip: ' + String(messageId).slice(0, 28) + ' from=' + from);
     return;
