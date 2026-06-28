@@ -7,6 +7,16 @@ const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
 
+// ── Engine (v2 pipeline) ────────────────────────────────────────────
+let engineCtx = null;
+let enginePipeline = null;
+try {
+  engineCtx = require("./lib/engine/context.cjs");
+  enginePipeline = require("./lib/engine/pipeline.cjs");
+} catch (e) {
+  console.error("[engine] failed to load pipeline — running legacy mode:", e.message);
+}
+
 // --- Admin inbox module (chat log + /admin panel). Never allow to break bot. ---
 let admin;
 try { admin = require("./admin.js"); }
@@ -9347,6 +9357,29 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
   }
 }
 
+// ── Engine init (called once, lazy) ───────────────────────────────────
+var _engineInited = false;
+function _initEngine() {
+  if (_engineInited || !engineCtx) return;
+  engineCtx.init({
+    SBSR_DRAFTS_DIR,
+    sendWhatsAppMessage,
+    sendWhatsAppCatalog,
+    sendWhatsAppLocationRequest,
+    notifySbsrAdminsText,
+    sendReaction,
+    sendToOpenClaw,
+    getCatalogSnapshot: function() { return loadProductCatalog(); },
+    sbsrRetrieveMemoryContext: function(f, t) { return sbsrRetrieveMemoryContext(f, t); },
+    log: function(tag, msg) { log(tag, msg); },
+  });
+  // Register handlers — new ctx-based handlers take priority
+  if (enginePipeline && enginePipeline.PIPELINE) {
+    // Future: register ctx-based handlers here
+  }
+  _engineInited = true;
+}
+
 async function handleMessage(msg, contacts) {
   const from = msg.from;
   const messageId = msg.id;
@@ -9826,6 +9859,19 @@ async function handleMessage(msg, contacts) {
       const _activeCheckoutForMenu = isSbsrCheckoutCollectionActive(_preDraftForMenu);
       const _preStateForMenu = String(_preDraftForMenu.state || "").trim().toLowerCase();
       let _cfRan = false; // true kalau classifier udah sukses analisis (skip isRestartIntent)
+      // ── Pipeline v2 ────────────────────────────────────────────
+      try { _initEngine(); } catch (_) {}
+      try {
+        var _v2ctx = engineCtx ? engineCtx.createContext({
+          from: from, messageId: messageId, contactName: contactName,
+          rawText: userText, msgType: msg.type, rawMsg: msg,
+        }) : null;
+        if (_v2ctx && enginePipeline) {
+          await enginePipeline.runPipeline(_v2ctx);
+          if (_v2ctx.handled) { sendReaction(from, messageId, "").catch(function(){}); return; }
+        }
+      } catch (_pipelineErr) { log("pipeline", "err: " + (_pipelineErr && _pipelineErr.message || "?")); }
+      // ── End pipeline ───────────────────────────────────────────
       if (isManualResetIntent(userText)) {
         log("sbsr-session", "manual_reset_triggered");
         hardResetSbsrSession(from);
