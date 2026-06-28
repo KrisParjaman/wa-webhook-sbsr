@@ -9305,7 +9305,7 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     "=== DAFTAR INTENT (pilih SATU) ===",
     "PENTING — STATE AWARE:",
     "- State=awaiting_usecase: customer sedang memilih use case. 'makan langsung', 'frozen', 'stok', 'meeting', 'gift', 'hampers' → choose_option.",
-    "- State=awaiting_product_selection: customer sedang pilih produk → choose_option atau place_order.",
+    "- State=awaiting_product_selection: customer sedang pilih produk → choose_option atau place_order. TAPI 'lanjut pesan', 'lanjutkan', 'proses', 'ya lanjut', 'ok lanjut', 'cek out', 'checkout' → confirm.",
     "- Kalau pesan mengandung alamat lengkap (jalan, nomor, kota) → langsung provide_address HIGH.",
     "- Kalau ada nama+alamat sekaligus → tetap provide_address (bukan unknown/medium).",
     "",
@@ -9465,6 +9465,38 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       case "place_order": {
         if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
           return true;
+        }
+        // Detect "lanjut pesan" / "proses" — customer wants to proceed with pending order
+        const _proceedRe = /\b(?:lanjut\s*(?:pesan|kan|aja|deh|saja|proses)|ya\s+lanjut|ok\s+lanjut|proses\s+pesan|langsung\s+proses|cek\s*out|checkout)\b/i;
+        if (_proceedRe.test(String(userText || "")) && state !== "none") {
+          const _bd = loadSbsrDraft(from) || {};
+          const _pendItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
+          const _summary = _bd.pending_order_summary || "";
+          if (_pendItems.length > 0 || _summary) {
+            // Simulate ya_lanjut: create items, send delivery buttons
+            let _price = 0;
+            if (_pendItems.length > 0) {
+              _price = _pendItems.reduce((sum, it) => {
+                const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
+                if (q <= 3) return sum + (isM ? 33000 : 29000);
+                if (q <= 6) return sum + (isM ? 63000 : 55000);
+                return sum + (isM ? 120000 : 105000);
+              }, 0);
+            } else {
+              const _pm = _summary.match(/Rp\s*([\d.]+)/);
+              _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+            }
+            const _pack = _pendItems.length > 0
+              ? _pendItems.reduce((s,it) => s + (Number(it.qty)||1), 0)
+              : 6;
+            const _form = /frozen/i.test(_summary) ? "frozen" : "goreng";
+            const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
+            saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_order_summary:null, pending_items:null, state:"awaiting_delivery_method" });
+            log("llm-classifier", "proceed_detected → awaiting_delivery_method price=" + _price + " pack=" + _pack);
+            await sendSbsrDeliveryMethodButtons(from);
+            sendReaction(from, messageId, "").catch(() => {});
+            return true;
+          }
         }
         // Set state BEFORE generating reply — LLM prompt lihat state baru
         let _replyDraft = draft;
