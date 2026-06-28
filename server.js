@@ -3162,7 +3162,7 @@ async function handleMessage(msg, contacts) {
     _initEngine();
     await _processMessage(msg, from, messageId, contactName);
   } catch (err) {
-    log("error", "Processing message from " + from + ": " + err.message);
+    log("error", "Processing message from " + from + ": " + err.message + " (stack: " + (err.stack || "").split("\n")[1]?.trim() + ")");
     try { await sendWhatsAppMessage(from, "Maaf, ada error. Coba lagi ya."); } catch (_) {}
   }
 }
