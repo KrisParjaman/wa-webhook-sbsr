@@ -748,8 +748,10 @@ function trimLLMPreamble(text) {
     return text.slice(invMatch.index);
   }
   // Payment block: keep from first 💰 Total or "Cara bayar" onwards
+  // Guard: only strip if text ALSO contains bank/transfer keywords (real payment message)
   const payMatch = text.match(/💰\s*\*?Total|\*Cara\s+bayar:?\*/);
-  if (payMatch && payMatch.index > 20) {
+  const isPayment = /\b(?:BCA|Mandiri|BRI|transfer|rekening|bank\s+account|nomor\s+rekening)\b/i.test(text);
+  if (payMatch && payMatch.index > 20 && isPayment) {
     log("preamble", "stripped payment preamble: " + text.slice(0, Math.min(payMatch.index, 120)).replace(/\n/g, "\\n"));
     return text.slice(payMatch.index);
   }
