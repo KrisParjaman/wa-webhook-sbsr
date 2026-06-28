@@ -7361,7 +7361,7 @@ const SBSR_ADD_MORE_DECLINE_RE = /^(?:2|tidak|gak|ga|nggak|no|lanjut\s+pembayara
 
 // ── LLM-FIRST INTENT CLASSIFIER CONFIG ─────────────────────────────
 let sbsrLlmClassifierEnabled = process.env.SBSR_LLM_CLASSIFIER !== "0"; // default ON, toggle via /classifier_on|off
-const CLASSIFIER_TIMEOUT_MS = 4000; // 4 detik — lebih cepat dari main LLM timeout (240s)
+const CLASSIFIER_TIMEOUT_MS = 10000; // 10 detik — OpenClaw response rata-rata 4-9s, classifier prompt panjang
 const CLASSIFIER_VALID_INTENTS = new Set([
   "greeting", "request_menu", "place_order", "cancel_order",
   "confirm", "deny", "provide_name", "provide_address",
