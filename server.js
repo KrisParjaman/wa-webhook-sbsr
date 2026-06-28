@@ -4878,7 +4878,19 @@ async function tryHandleUseCaseRouter(from, userText) {
       log("sbsr-usecase", "state_setter use_case=gift_hampers");
       log("sbsr-order-flow", "awaiting_product_selection");
     }
-    await sendWhatsAppMessage(from, hit.reply);
+    // Jika ada pending_items, pakai LLM natural reply daripada template
+    const _pItems = Array.isArray(nextDraft.pending_items) ? nextDraft.pending_items : [];
+    if (_pItems.length > 0) {
+      const _useNatReply = await generateClassifierReply(from, userText, "choose_option", nextDraft);
+      if (_useNatReply && _useNatReply.reply) {
+        await sendWhatsAppMessage(from, _useNatReply.reply);
+        log("sbsr-usecase", "natural_reply_with_pending_items count=" + _pItems.length);
+      } else {
+        await sendWhatsAppMessage(from, hit.reply);
+      }
+    } else {
+      await sendWhatsAppMessage(from, hit.reply);
+    }
     if (hasItems && String(draft.state || "").trim().toLowerCase() === "awaiting_usecase") {
       const postPickDraft = { ...(loadSbsrDraft(from) || nextDraft), use_case: resolvedUseCase };
       const hasFrozenItems = Array.isArray(postPickDraft.items) && postPickDraft.items.some((it) => it && it.form === "frozen");
