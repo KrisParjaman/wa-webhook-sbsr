@@ -6281,6 +6281,10 @@ async function tryHandleAddressTextCapture(from, userText) {
   if (!Array.isArray(draft.items) || draft.items.length === 0) return false;
   if (draft.invoice_sent_at) return false;
   if (draft.state && ["awaiting_invoice_confirm","awaiting_proof","pending_finance","approved","BOOKED","booked","delivered","cancelled","awaiting_manual_payment_review","payment_verified_manual"].includes(draft.state)) return false;
+  // Accept both finalized items and pending_items (from classifier natural reply flow)
+  const _hasAddrItems = (Array.isArray(draft.items) && draft.items.length > 0) ||
+                         (Array.isArray(draft.pending_items) && draft.pending_items.length > 0);
+  if (!_hasAddrItems) return false;
 
   const captured = userText.trim().replace(/\s+/g, " ");
   log("sbsr-addr-text", `from=${from} captured="${captured.slice(0, 80)}"`);
@@ -6291,7 +6295,25 @@ async function tryHandleAddressTextCapture(from, userText) {
   };
   saveSbsrDraft(from, nextDraft);
 
-  const latestDraft = loadSbsrDraft(from) || nextDraft;
+  // Convert pending_items to real items if not already set (natural reply flow)
+  let latestDraft = loadSbsrDraft(from) || nextDraft;
+  if ((!Array.isArray(latestDraft.items) || latestDraft.items.length === 0) &&
+      Array.isArray(latestDraft.pending_items) && latestDraft.pending_items.length > 0) {
+    const _pit = latestDraft.pending_items;
+    const _form = String(latestDraft.use_case || "").includes("frozen") ? "frozen" : "goreng";
+    const _totalPcs = _pit.reduce((s, it) => s + (Number(it.qty) || 1), 0);
+    const _subtotal = _pit.reduce((sum, it) => {
+      const q = Number(it.qty) || 3;
+      const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name || ""));
+      if (q <= 3) return sum + (isM ? 33000 : 29000);
+      if (q <= 6) return sum + (isM ? 63000 : 55000);
+      return sum + (isM ? 120000 : 105000);
+    }, 0);
+    const _name = "Risol " + (_form === "frozen" ? "Frozen" : "Goreng") + " — Mix " + _totalPcs + "pcs";
+    latestDraft = { ...latestDraft, items: [{ name: _name, qty: 1, pack_size: _totalPcs, unit_price: _subtotal, form: _form }], subtotal: _subtotal, pending_items: null };
+    saveSbsrDraft(from, latestDraft);
+    log("sbsr-addr-text", "converted pending_items to items subtotal=" + _subtotal + " pack=" + _totalPcs);
+  }
   const hasName = !!(latestDraft.customer_name || (typeof findNameInChatHistory === "function" && findNameInChatHistory(from)));
   const hasDest = sbsrDraftHasDestination(latestDraft) || !!(latestDraft.gmaps_link || (latestDraft.destination && latestDraft.destination.gmaps_link));
   if (hasName && hasDest) {
