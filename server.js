@@ -9226,8 +9226,11 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     bridgeContext || "(tidak ada — ini pesan pertama atau setelah reset)",
     "",
     "=== DAFTAR INTENT (pilih SATU) ===",
-    "PENTING: Kalau pesan mengandung alamat lengkap (jalan, nomor, kota) → langsung provide_address HIGH.",
-    "Kalau ada nama+alamat sekaligus → tetap provide_address (bukan unknown/medium).",
+    "PENTING — STATE AWARE:",
+    "- State=awaiting_usecase: customer sedang memilih use case. 'makan langsung', 'frozen', 'stok', 'meeting', 'gift', 'hampers' → choose_option.",
+    "- State=awaiting_product_selection: customer sedang pilih produk → choose_option atau place_order.",
+    "- Kalau pesan mengandung alamat lengkap (jalan, nomor, kota) → langsung provide_address HIGH.",
+    "- Kalau ada nama+alamat sekaligus → tetap provide_address (bukan unknown/medium).",
     "",
     "greeting: menyapa (halo, pagi, assalamualaikum)",
     "request_menu: minta menu/katalog/pricelist (menu dong, kirim katalog, pricelist, daftar harga, lihat menu)",
@@ -9386,17 +9389,23 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
         if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
           return true;
         }
+        // Set state BEFORE generating reply — LLM prompt lihat state baru
+        let _replyDraft = draft;
+        if (state === "none") {
+          const d = loadSbsrDraft(from) || {};
+          saveSbsrDraft(from, { ...d, state: "awaiting_usecase" });
+          _replyDraft = { ...d, state: "awaiting_usecase" };
+        }
         // LLM natural reply — tanpa auto-catalog
-        const _reply = await generateClassifierReply(from, userText, "place_order", draft);
+        const _reply = await generateClassifierReply(from, userText, "place_order", _replyDraft);
         if (_reply) {
           await sendWhatsAppMessage(from, _reply);
-          log("llm-classifier", "natural_reply intent=place_order state=" + state);
+          log("llm-classifier", "natural_reply intent=place_order prev_state=" + state + " new_state=" + (_replyDraft.state || "?"));
           return true;
         }
         // Fallback: template (kalau LLM gagal)
-        if (state === "none") {
-          await sendSbsrUseCasePrompt(from, draft.phone ? draft : { phone: from });
-        }
+        await sendSbsrUseCasePrompt(from, _replyDraft.phone ? _replyDraft : { phone: from });
+        return true;
         return true;
       }
 
