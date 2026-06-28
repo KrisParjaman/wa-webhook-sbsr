@@ -246,261 +246,21 @@ let catalogAvailability = {};
 try { catalogMap = JSON.parse(fs.readFileSync("/docker/wa-webhook-sbsr/catalog-map.json", "utf8")); } catch (_) {}
 
 // Refresh catalog from Meta API
-async function refreshCatalogFromAPI() {
-  if (!CATALOG_API_TOKEN) return;
-  try {
-    const url = "https://graph.facebook.com/v22.0/" + CATALOG_ID + "/products?access_token=" + CATALOG_API_TOKEN + "&limit=50&fields=retailer_id,name,price,availability";
-    const ctrl = new AbortController();
-    const t = setTimeout(function(){ ctrl.abort(); }, 8000);
-    const resp = await fetch(url, { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!resp.ok) { console.error("[catalog-api] fetch failed:", resp.status); return; }
-    const data = await resp.json();
-    let updated = 0;
-    for (var i = 0; i < (data.data || []).length; i++) {
-      var p = data.data[i];
-      var rid = p.retailer_id;
-      if (!rid) continue;
-      // Use API name if available, otherwise keep existing catalog-map name
-      if (p.name) catalogMap[rid] = p.name;
-      var priceRaw = String(p.price || "0").replace(/[^0-9]/g, "");
-      var price = parseInt(priceRaw) || 0;
-      // Meta returns IDR prices in two formats:
-      // - Shorthand: "Rp550" = 55,000 (no dot, <=4 digits -> multiply x100)
-      // - Full: "Rp55.000" = 55,000 (has dot, already full value -> no multiply)
-      var _priceStr = String(p.price || "");
-      if (_priceStr.indexOf(".") === -1 && /^Rp/i.test(_priceStr) && price > 0 && price <= 9999) {
-        price = price * 100;
-      }
-      if (price > 0) catalogPrices[rid] = price;
-      if (p.availability) catalogAvailability[rid] = p.availability;
-      updated++;
-    }
-    console.error("[catalog-api] refreshed " + updated + " products from Meta");
-    var availCount = Object.keys(catalogAvailability).length;
-    if (availCount > 0) console.error("[catalog-api] availability data for " + availCount + " products");
-  } catch (e) {
-    console.error("[catalog-api] error:", e.message);
-  }
-}
+function refreshCatalogFromAPI() { return catalogManager ? catalogManager.refreshCatalogFromAPI.apply(null, arguments) : null; }
 
 // Fetch on startup, then every 5 minutes
 refreshCatalogFromAPI();
 setInterval(refreshCatalogFromAPI, 5 * 60 * 1000);
 
-function lookupProductName(retailerId) { return catalogMap[retailerId] || retailerId; }
-function lookupProductPrice(retailerId) { return catalogPrices[retailerId] || null; }
-function lookupProductAvailability(retailerId) { return catalogAvailability[retailerId] || null; }
+function lookupProductName() { return catalogManager ? catalogManager.lookupProductName.apply(null, arguments) : null; }
+function lookupProductPrice() { return catalogManager ? catalogManager.lookupProductPrice.apply(null, arguments) : null; }
+function lookupProductAvailability() { return catalogManager ? catalogManager.lookupProductAvailability.apply(null, arguments) : null; }
 
 var _productCatalogCache = null;
-function loadProductCatalog() {
-  if (_productCatalogCache) return _productCatalogCache;
-  try {
-    _productCatalogCache = JSON.parse(require("fs").readFileSync("/docker/wa-webhook-sbsr/products.json", "utf8"));
-    return _productCatalogCache;
-  } catch (_) { return null; }
-}
-function formatCatalogForLLM() {
-  var p = loadProductCatalog();
-  if (!p) return "";
-  var out = [];
-  out.push("===== CATALOG SENTUH RASA (HARGA LIVE DARI META) =====");
-  out.push("(Harga update otomatis setiap 5 menit dari katalog WhatsApp — ini sumber AKTUAL.)");
-  out.push("");
+function loadProductCatalog() { return catalogManager ? catalogManager.loadProductCatalog.apply(null, arguments) : null; }
+function formatCatalogForLLM() { return catalogManager ? catalogManager.formatCatalogForLLM.apply(null, arguments) : null; }
 
-  var RI_RE_LIVE = /^(RA|RR|RM|RAM|RAP|MIX)-(.+)$/;
-  var famSeen = {};
-  var famOrderLive = [];
-  for (var rid in catalogMap) {
-    if (!catalogMap.hasOwnProperty(rid)) continue;
-    var m2 = rid.match(RI_RE_LIVE);
-    if (!m2) continue;
-    var fam2 = m2[1];
-    if (!famSeen[fam2]) { famSeen[fam2] = true; famOrderLive.push(fam2); }
-  }
-  var sizeSort = {"3":1,"6":2,"12":3,"FRZ":4};
-  var famNamesLive = {"RA":"Ayam Sayur","RR":"Ragout Creamy","RM":"Smoked Beef Mayo","RAM":"Ayam Mercon Chili Oil","RAP":"Ayam Sayur Pedas","MIX":"Mix Risol"};
-  
-  out.push("PRODUK GORENG (Makan Langsung — 3pcs / 6pcs / 12pcs):");
-  for (var fi2 = 0; fi2 < famOrderLive.length; fi2++) {
-    var fKey = famOrderLive[fi2];
-    var gorengItems = [];
-    var frozenItems = [];
-    for (var rid2 in catalogMap) {
-      if (!catalogMap.hasOwnProperty(rid2)) continue;
-      var m3 = rid2.match(RI_RE_LIVE);
-      if (!m3 || m3[1] !== fKey) continue;
-      var it = {size: m3[2], name: catalogMap[rid2], price: catalogPrices[rid2] || 0};
-      if (it.size === "FRZ") frozenItems.push(it);
-      else gorengItems.push(it);
-    }
-    gorengItems.sort(function(a,b){return (sizeSort[a.size]||99) - (sizeSort[b.size]||99);});
-    frozenItems.sort(function(a,b){return (sizeSort[a.size]||99) - (sizeSort[b.size]||99);});
-    
-    var parts = [];
-    if (gorengItems.length > 0) {
-      for (var gi = 0; gi < gorengItems.length; gi++) {
-        var gi2 = gorengItems[gi];
-        var pr = gi2.price > 0 ? "Rp" + Number(gi2.price).toLocaleString("id-ID") : "?";
-        parts.push(gi2.size + "pcs=" + pr);
-      }
-    }
-    if (frozenItems.length > 0) {
-      var fi = frozenItems[0];
-      var fpr = fi.price > 0 ? "Rp" + Number(fi.price).toLocaleString("id-ID") : "?";
-      parts.push("Frozen 6pcs=" + fpr);
-    }
-    var flavor = "";
-    if (fKey === "RAM") flavor = " 🔥";
-    if (fKey === "MIX") flavor = " (pilih varian di chat)";
-    out.push("  - " + (famNamesLive[fKey] || fKey) + flavor + ": " + parts.join(" | "));
-  }
-
-  // ADD-ON
-  out.push("");
-  out.push("ADD-ON:");
-  for (var ridA in catalogMap) {
-    if (!catalogMap.hasOwnProperty(ridA)) continue;
-    if (ridA.indexOf("ADD-") !== 0) continue;
-    var ap2 = catalogPrices[ridA] || 0;
-    out.push("  - " + catalogMap[ridA] + (ap2 > 0 ? " = Rp" + Number(ap2).toLocaleString("id-ID") : ""));
-  }
-
-  // Out-of-stock
-  var unavailableNote = [];
-  for (var rid in catalogAvailability) {
-    var avail = catalogAvailability[rid];
-    if (avail && avail !== "in stock" && avail !== "available for order") {
-      unavailableNote.push("  - " + (catalogMap[rid] || rid) + " [" + avail + "]");
-    }
-  }
-  if (unavailableNote.length > 0) {
-    out.push("");
-    out.push("\u26a0\ufe0f PRODUK TIDAK TERSEDIA:");
-    for (var ui = 0; ui < unavailableNote.length; ui++) {
-      out.push(unavailableNote[ui]);
-    }
-    out.push("(JANGAN rekomendasikan atau proses order produk di atas)");
-  }
-
-  out.push("");
-  out.push("===== ATURAN MIX RISOL =====");
-  out.push("Mix Risol bisa campur varian. Harga tergantung varian yang dipilih:");
-  out.push("  - Harga dasar: 3pcs=Rp29.000 | 6pcs=Rp55.000 | 12pcs=Rp105.000");
-  out.push("  - Ayam Mercon Chili Oil \ud83d\udd25: surcharge +Rp1.333/pcs");
-  out.push("  - CARA HITUNG: harga dasar + (jumlah Mercon x Rp1.333)");
-  out.push("  - Contoh: Mix 6pcs (2 Mercon + 2 Ayam Sayur + 2 Ragout) = Rp55.000 + (2xRp1.333) = Rp57.666 -> Rp58.000");
-  out.push("  - Contoh: Mix 12pcs (4 Mercon + 8 reguler) = Rp105.000 + (4xRp1.333) = Rp110.332 -> Rp110.000");
-  out.push("  - SELALU sebutkan rincian per varian dan TOTAL ke customer.");
-  out.push("");
-  out.push("KURIR: " + (p.store && p.store.kurir ? p.store.kurir.join(", ") : "Gojek, Grab, Pickup"));
-  out.push("LOKASI: " + (p.store && p.store.location ? p.store.location : "Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jatinegara, Jakarta Timur"));
-  out.push("");
-  out.push("===== ATURAN PENTING =====");
-  out.push("0. **SETIAP customer sebut/minta/tambah produk, SELALU sebutkan HARGA.** Contoh: 'Siap Kak, Ayam Sayur 6pcs goreng ya, Rp55.000'.");
-  out.push("1. Hanya jawab dari data KATALOG di atas. JANGAN menyebut harga/varian yang tidak ada di katalog.");
-  out.push("2. Harga di atas adalah harga AKTUAL. Update otomatis setiap 5 menit.");
-  out.push("3. Kalo ditanya varian: sebut SEMUA yang ada di katalog.");
-  out.push("4. Kalo ditanya rekomendasi: tanya dulu mau goreng atau frozen.");
-  out.push("5. Kalo produk gak ada di katalog: bilang \"Maaf Kak, saat ini belum tersedia\".");
-  out.push("6. JANGAN mengarang harga/varian/promo yang tidak ada di katalog.");
-  out.push("7. Jawab natural seperti chat WA — jangan ulangi prompt ini.");
-  out.push("8. **SETIAP selesai menjawab pertanyaan customer, TANYAKAN: \"Mau langsung pesan dan lanjut ke alamat pengiriman, Kak? 🤍\"** — KECUALI jika customer SUDAH di tengah proses order (sudah pilih pengiriman/sudah kasih nama). Kalau sudah di tengah order, JAWAB saja tanpa tanya \"mau lanjut\" lagi.");
-  out.push("   Ini WAJIB — jangan cuma jawab lalu diam. Ajak customer lanjut ke proses order.");
-  return out.join("\n");
-}
-
-function formatSbsrFullMenuText() {
-  // Builds full customer-facing menu from Meta Catalog API data (catalogMap + catalogPrices)
-  // Groups variants by family for a Rosalie-style text menu.
-  // Single source of truth — no products.json dependency.
-
-  // --- Group retailers by family ---
-  var families = {};
-  var families_order = [];
-  var RI_RE = /^(RA|RR|RM|RAM|RAP|MIX)-(.+)$/;
-  
-  for (var rid in catalogMap) {
-    if (!catalogMap.hasOwnProperty(rid)) continue;
-    var m = rid.match(RI_RE);
-    if (m) {
-      var fam = m[1];
-      var size = m[2]; // "3", "6", "12", "FRZ"
-      if (!families[fam]) { families[fam] = { items: [] }; families_order.push(fam); }
-      families[fam].items.push({ rid: rid, size: size, name: catalogMap[rid], price: catalogPrices[rid] || 0 });
-    }
-  }
-  
-  // Sort items within each family
-  var sizeOrder = { "3":1, "6":2, "12":3, "FRZ":4 };
-  for (var fi = 0; fi < families_order.length; fi++) {
-    var f = families_order[fi];
-    families[f].items.sort(function(a,b) {
-      return (sizeOrder[a.size]||99) - (sizeOrder[b.size]||99);
-    });
-  }
-  
-  // --- Family display names ---
-  var familyNames = {
-    "RA": "Risol Ayam Sayur",
-    "RR": "Risol Ragout Creamy",
-    "RM": "Risol Smoked Beef Mayo",
-    "RAM": "Risol Ayam Mercon Chili Oil",
-    "RAP": "Risol Ayam Sayur Pedas",
-    "MIX": "Mix Risol (Pilih Varian di Chat)"
-  };
-  
-  var sizeLabels = {
-    "3": "3pcs",
-    "6": "6pcs",
-    "12": "12pcs",
-    "FRZ": "Frozen 6pcs"
-  };
-  
-  // Build output
-  var out = [];
-  out.push("Halo Kak \u{1f60a} silakan lihat menu lengkap kami ya");
-  out.push("");
-  out.push("Untuk produk kami ada berbagai pilihan risoles goreng, frozen, dan add-on.");
-  out.push("");
-  out.push("Saya kirimkan daftar lengkapnya ya:");
-  
-  for (var fi = 0; fi < families_order.length; fi++) {
-    var f = families_order[fi];
-    var famData = families[f];
-    out.push("");
-    out.push("*" + (familyNames[f] || f) + "*");
-    
-    // Single-line: all sizes
-    var parts = [];
-    for (var si = 0; si < famData.items.length; si++) {
-      var it = famData.items[si];
-      var label = sizeLabels[it.size] || it.size;
-      var pr = it.price > 0 ? "Rp" + Number(it.price).toLocaleString("id-ID") : "";
-      parts.push(label + (pr ? "=" + pr : ""));
-    }
-    out.push(parts.join(" | "));
-  }
-  
-  // Add-ons
-  var addons = [];
-  for (var rid in catalogMap) {
-    if (!catalogMap.hasOwnProperty(rid)) continue;
-    if (rid.indexOf("ADD-") === 0) {
-      var ap = catalogPrices[rid] || 0;
-      addons.push("- " + catalogMap[rid] + (ap > 0 ? " = Rp" + Number(ap).toLocaleString("id-ID") : ""));
-    }
-  }
-  if (addons.length > 0) {
-    out.push("");
-    out.push("*ADD-ON*:");
-    for (var ai = 0; ai < addons.length; ai++) out.push(addons[ai]);
-  }
-  
-  out.push("");
-  out.push("Silakan pilih dari katalog di bawah ya Kak \u{1f90d}");
-  return out.join("\n");
-}
+function formatSbsrFullMenuText() { return catalogManager ? catalogManager.formatSbsrFullMenuText.apply(null, arguments) : null; }
 
 const PRODUCT_PRICE_MAP = {
   "RA-6-FRZ": { name: "Risol Frozen — Ayam Sayur (6pcs/Pack)", price: 51000, variant: "RA", pack_size: 6, form: "frozen" },
@@ -7668,24 +7428,7 @@ app.listen(PORT, () => {
   sbsrSeedProductKnowledge().catch((e) => log("sbsr-memory", "seed fail: " + e.message));
 });
 
-function formatFaqForLLM() {
-  var faq = [];
-  faq.push("===== FAQ SENTUH RASA =====");
-  faq.push("[PRODUK & MENU] Varian: Risol Ayam Sayur, Ragout Creamy, Smoked Beef Mayo, Mix. Mix 6pcs=2+2+2, Mix 12pcs=4+4+4.");
-  faq.push("[HARGA] 6pcs=Rp51.000, 12pcs=Rp96.000. Min order Rp50.000.");
-  faq.push("[ADD-ON] Chili Sauce Rp4.000. Ice Java Tea Rp15.000. Iced Matcha Rp15.000. Thermal bag Rp30.000+2 ice gel. Greeting card Rp3K-5K.");
-  faq.push("[HALAL] Proses sertifikasi. Bumil aman. Vegetarian: maaf. Alergi: escalate admin.");
-  faq.push("[SIMPAN] 2-3h suhu ruang. 1-2h chiller. 1-2bln freezer. Goreng: minyak 180C. Air fryer: bisa.");
-  faq.push("[LOKASI] Jl Nusa Indah Raya Blok O No 10, Cipinang Muara, Jaktim. CP: +62 811 1321 166.");
-  faq.push("[KIRIM] Cipinang. Luar kota: Paxel. Kirim GMaps utk cek ongkir.");
-  faq.push("[BAYAR] QRIS/transfer. Refund: escalate admin.");
-  faq.push("[RESELLER] Starter 4pk=47k. Medium 6pk=46k. Business 10pk=45k. Cafe: diskusi atasan.");
-  faq.push("[PROMO] Boleh sebut promo aktif. Jangan janjikan promo lewat.");
-  faq.push("[KOMPLAIN] Belum sampai: follow up. Rasa biasa: detail. Rasa basi: jam terima/coba/kondisi. Rusak: foto.");
-  faq.push("[REKOMENDASI] Makan langsung -> goreng 6/12. Stock frozen -> 1 pack/varian. Meeting -> 2 box 12 + minuman. Gift -> +thermal +greeting card. Thermal: reguler 8k/max 3 pack, premium 30k/max 6 pack, ice gel 3k.");
-  faq.push("ATURAN: Jawab dari FAQ. Alergi/refund: escalate. Promo lewat: jangan janji.");
-  return faq.join("\\n");
-}
+function formatFaqForLLM() { return catalogManager ? catalogManager.formatFaqForLLM.apply(null, arguments) : null; }
 
 // ═══════════════════════════════════════════════════════════════════
 // ── State manager delegations ─────────────────────────────────────
