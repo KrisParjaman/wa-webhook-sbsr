@@ -67,6 +67,9 @@ if (SBSR_PAUSE) {
 const app = express();
 const PORT = 3001;
 
+// Admin new-message notification cooldown: notify admin at most once per 30 min per customer
+const _adminNotifLastSent = new Map(); // phone → timestamp ms
+
 // --- Config from .env ---
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
@@ -9141,6 +9144,26 @@ async function handleMessage(msg, contacts) {
     const _d = loadSbsrDraft(from) || { phone: from };
     saveSbsrDraft(from, { ..._d, last_inbound_at: new Date().toISOString() });
   } catch (_) {}
+
+  // Notify admin on new incoming message (once per 30 min per customer, non-admin only)
+  if (!_isAdminPhoneSec(from)) {
+    const _now = Date.now();
+    const _lastNotif = _adminNotifLastSent.get(from) || 0;
+    if (_now - _lastNotif > 30 * 60 * 1000) {
+      _adminNotifLastSent.set(from, _now);
+      const _fins = getSbsrFinancePhones();
+      const _name = contacts?.[0]?.profile?.name || "";
+      const _label = _name ? _name + " (+" + from + ")" : "+" + from;
+      const _notifText =
+        "🔔 *Pesan Baru Masuk*\n" +
+        "Dari: " + _label + "\n\n" +
+        "Segera cek panel admin:\n" +
+        "https://production.biks.ai/admin";
+      for (const _fin of _fins) {
+        sendWhatsAppMessage(_fin, _notifText).catch(() => {});
+      }
+    }
+  }
 
   try {
     markAsRead(messageId).catch(() => {});
