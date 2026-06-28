@@ -10,11 +10,17 @@ const WebSocket = require("ws");
 // ── Engine (v2 pipeline) ────────────────────────────────────────────
 let engineCtx = null;
 let enginePipeline = null;
+let waSender = null;
+let catalogManager = null;
+let paymentEngine = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
+  waSender = require("./lib/wa-sender.cjs");
+  catalogManager = require("./lib/catalog-manager.cjs");
+  paymentEngine = require("./lib/payment-engine.cjs");
 } catch (e) {
-  console.error("[engine] failed to load pipeline — running legacy mode:", e.message);
+  console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
 
 // --- Admin inbox module (chat log + /admin panel). Never allow to break bot. ---
@@ -9373,10 +9379,33 @@ function _initEngine() {
     sbsrRetrieveMemoryContext: function(f, t) { return sbsrRetrieveMemoryContext(f, t); },
     log: function(tag, msg) { log(tag, msg); },
   });
-  // Register handlers — new ctx-based handlers take priority
-  if (enginePipeline && enginePipeline.PIPELINE) {
-    // Future: register ctx-based handlers here
-  }
+  // Init wa-sender
+  if (waSender) waSender.init({
+    apiVersion: WA_API_VERSION, phoneNumberId: WA_PHONE_NUMBER_ID, accessToken: WA_ACCESS_TOKEN,
+    log: log, sanitizeReply: sanitizeLLMReply, isWindowOpen: isWaWindowOpen,
+    onSent: function(to, text) {
+      safeLog(admin.logOutgoing, to, text);
+      try { var _n = String(to).replace(/[^0-9]/g, ''); var _dr = loadSbsrDraft(to) || { phone: _n }; saveSbsrDraft(to, { ..._dr, last_reply_at: new Date().toISOString() }); } catch (_) {}
+    },
+  });
+  // Init catalog-manager
+  if (catalogManager) catalogManager.init({
+    apiToken: CATALOG_API_TOKEN, catalogId: CATALOG_ID,
+    getCatalogMap: function() { return catalogMap; },
+    getPrices: function() { return catalogPrices; },
+    getAvailability: function() { return catalogAvailability; },
+    log: log,
+  });
+  // Init payment-engine
+  if (paymentEngine) paymentEngine.init({
+    log: log,
+    sendMessage: sendWhatsAppMessage,
+    sendImage: sendWhatsAppImage,
+    notifyAdmin: notifySbsrAdminsText,
+    loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft,
+    openclawContainer: OPENCLAW_EXEC_CONTAINER,
+    receiptBaseUrl: RECEIPT_BASE_URL,
+  });
   _engineInited = true;
 }
 
