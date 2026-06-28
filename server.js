@@ -14,8 +14,10 @@ let admin;
 try { admin = require("./admin.js"); }
 catch (e) {
   console.error("[admin] failed to load, using no-op stubs:", e.message);
-  admin = { logIncoming:()=>{}, logOutgoing:()=>{}, isPaused:()=>false, setPaused:()=>{}, listChats:()=>[], getChat:()=>({}), stats:()=>({}), safePhone:(p)=>String(p||"").replace(/[^0-9]/g,""), mount:()=>{} };
+  admin = { logIncoming:()=>{}, logOutgoing:()=>{}, isPaused:()=>false, setPaused:()=>{}, listChats:()=>[], getChat:()=>({}), stats:()=>({}), safePhone:(p)=>String(p||"").replace(/[^0-9]/g,""), mount:()=>{}, init:()=>{} };
 }
+// Inject pgPool into admin for dual-write to wa_messages
+if (admin && admin.init) admin.init(pgPool);
 function safeLog(fn, ...args) { try { const r = fn(...args); if (r && r.catch) r.catch(e => console.error("[admin] log err:", e.message)); } catch (e) { console.error("[admin] log err:", e.message); } }
 
 // --- BIKS SECURITY HARDENING (2026-05-07) ---
@@ -100,6 +102,51 @@ const CHAT_TIMEOUT_MS = 240000;
 const RECEIPT_BASE_URL = "https://production.biks.ai/receipts/";
 const IMGBB_KEY = "7f6defdcbb8475ac203f45c966b36a78";
 const UPLOAD_DIR = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads";
+
+// --- Conversation message retention ---
+const WA_MSG_RETENTION_DAYS = parseInt(process.env.WA_MSG_RETENTION_DAYS || "90");
+const WA_MSG_MAX_PER_PHONE  = parseInt(process.env.WA_MSG_MAX_PER_PHONE  || "500");
+
+async function ensureWaMessagesTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS wa_messages (
+      id         BIGSERIAL PRIMARY KEY,
+      phone      TEXT NOT NULL,
+      dir        TEXT NOT NULL CHECK (dir IN ('in', 'out')),
+      text       TEXT NOT NULL DEFAULT '',
+      ts         BIGINT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await pgPool.query("CREATE INDEX IF NOT EXISTS wa_messages_phone_created ON wa_messages (phone, created_at DESC)");
+  console.error("[wa-messages] table ready");
+}
+
+async function pruneOldMessages() {
+  try {
+    const r1 = await pgPool.query(
+      "DELETE FROM wa_messages WHERE created_at < now() - ($1 || ' days')::interval",
+      [WA_MSG_RETENTION_DAYS]
+    );
+    const r2 = await pgPool.query(
+      `DELETE FROM wa_messages WHERE id IN (
+        SELECT id FROM (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
+          FROM wa_messages
+        ) ranked WHERE rn > $1
+      )`,
+      [WA_MSG_MAX_PER_PHONE]
+    );
+    if (r1.rowCount > 0 || r2.rowCount > 0)
+      console.error("[wa-messages] pruned: " + r1.rowCount + " expired, " + r2.rowCount + " excess rows");
+  } catch (e) {
+    console.error("[wa-messages] prune error:", e.message);
+  }
+}
+
+ensureWaMessagesTable()
+  .then(function() { pruneOldMessages(); setInterval(pruneOldMessages, 24 * 60 * 60 * 1000); })
+  .catch(function(e) { console.error("[wa-messages] table init error:", e.message); });
 
 // --- Catalog product ID mapping (PostgreSQL primary, Meta API live sync) ---
 const CATALOG_API_TOKEN = process.env.CATALOG_API_TOKEN || "";
