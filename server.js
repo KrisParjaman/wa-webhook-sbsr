@@ -7320,11 +7320,12 @@ const ADMIN_CMD_RE = /^\s*\/?\s*(approve|reject|terima|tolak)\s+([0-9]{4,})(?:\s
 const CATALOG_REQUEST_RE = /(?:\b(?:menu|pricelist|katalog|catalog|order|pesen|pesan|lihat)(?:nya|ku|mu|kah)?\b|\bno\s*\.?\s*1\b|\bnomor\s*1\b|\b(?:mana|bisa|tolong|minta)\s+(?:menu|pricelist|katalog|lihat)(?:nya)?\b|\bkirim(?:kan)?\s+(?:menu|pricelist|katalog)(?:nya)?\b|\blangsung\s+order\b|\bmau\s+lihat(?:nya)?\b|\bada\s+(?:menu|varian|pilihan)(?:nya)?\s*apa\b|\btunjukin\b|\btunjukkan\b|\bboleh\s+lihat(?:nya)?\b|^\s*[12]\s*[.)]?\s*$)/i;
 const SBSR_GREETING_RE = /^(hi|hai|halo|hallo|hello|pagi|siang|sore|malam|assalamualaikum|assalamu'alaikum)\b/i;
 const SBSR_FIXED_GREETING_TEXT =
-  "Hi, Teman Rasa, Mintu disini siap membantu\n" +
-  "Terima kasih sudah menghubungi Sentuh Rasa - Risoles Otentik. Apanih yang bisa Mintu bantu? 🤍\n" +
-  "1. Kirimkan menu/pricelist\n" +
-  "2. Mau langsung order\n" +
-  "3. Mau tanya-tanya";
+  "Ijin mengirimkan Menu/Pricelist ya ka😊🙏🏻\n\n" +
+  "Risoles Sentuh Rasa dibuat untuk kakak yang mencari cemilan dengan kualitas rasa konsisten, isian melimpah, dan bahan serta racikan yg tepat✨\n\n" +
+  "Karena itu banyak pelanggan kami yang akhirnya repeat order untuk stok di rumah, suguhan tamu, maupun acara kantor.\n\n" +
+  "Batch produksi hari ini masih tersedia ya ka, namun beberapa varian sering sold out lebih cepat🙏\n\n" +
+  "Jika ingin mencicipi, Kakak bisa pesan sekarang untuk mengamankan stoknya, boleh diinfo mau Frozen atau goreng ka? 🥰";
+const SBSR_CATALOG_IMAGE_PATH = "/docker/wa-webhook-sbsr/static/catalog-image.jpeg";
 const SBSR_MAINMENU_Q3_RE = /^\s*3(?:[.)\s].*)?\s*$/i;
 
 const SBSR_PICKUP_RE = /^(?:ambil\s*sendiri|pickup|pick\s*up|mampir)(?:[\s,.!?:-].*)?$/i;
@@ -7332,6 +7333,18 @@ const SBSR_PICKUP_ADDRESS_TEXT = "Jl Nusa Indah Raya blok O no 10, Cipinang Muar
 const SBSR_PICKUP_MAPS_URL = "https://share.google/ykWkdLTDJgG2UVfOQ";
 const SBSR_PICKUP_CONTACT = "Sentuh Rasa\n+62 811 1321 166";
 const SBSR_SESSION_REENTRY_RE = /^(?:hi|halo|hello|helo|hai|pagi|siang|sore|malam|permisi|tes|test|menu|pricelist|order|mau\s+order|pesan|beli|reset)\b/i;
+
+async function sendWelcomeWithCatalog(from) {
+  await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+  try {
+    if (fs.existsSync(SBSR_CATALOG_IMAGE_PATH)) {
+      const mediaId = await uploadMediaToWhatsApp(SBSR_CATALOG_IMAGE_PATH, "image/jpeg");
+      await sendWhatsAppImage(from, mediaId, "Menu Sentuh Rasa 🤍");
+    }
+  } catch (e) {
+    log("welcome", "catalog_image_failed: " + e.message);
+  }
+}
 const SBSR_TRANSIENT_RESET_STATES = new Set([
   "awaiting_name",
   "awaiting_addon_reply",
@@ -7778,7 +7791,7 @@ async function tryHandleDeterministicGreeting(from, userText) {
   if (draft && draft.state) return false; // active checkout — let LLM handle
   const t = String(userText || '').trim().toLowerCase();
   if (/^(?:hi|halo|hello|helo|hai|pagi|siang|sore|malam|assalamu|permisi|tes|test)$/i.test(t)) {
-    await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+    await sendWelcomeWithCatalog(from);
     return true;
   }
   return false;
@@ -9298,7 +9311,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       case "greeting": {
         if (isSbsrCheckoutCollectionActive(draft)) return false;
         if (await tryHandleDeterministicGreeting(from, userText)) return true;
-        await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+        await sendWelcomeWithCatalog(from);
         return true;
       }
 
@@ -9454,7 +9467,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
 
       case "reset": {
         hardResetSbsrSession(from);
-        await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+        await sendWelcomeWithCatalog(from);
         return true;
       }
 
@@ -9953,7 +9966,7 @@ async function handleMessage(msg, contacts) {
         hardResetSbsrSession(from);
         log("sbsr-session", "checkout_state_cleared");
         try {
-          await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT);
+          await sendWelcomeWithCatalog(from);
           log("sbsr-session", "greeting_restart_sent");
         } catch (_) {}
         sendReaction(from, messageId, "").catch(() => {});
@@ -10130,7 +10143,7 @@ async function handleMessage(msg, contacts) {
             return;
           }
         } catch (e) { log("sbsr-greeting", "interrupt err: " + e.message); }
-        try { await sendWhatsAppMessage(from, SBSR_FIXED_GREETING_TEXT); } catch (_) {}
+        try { await sendWelcomeWithCatalog(from); } catch (_) {}
         sendReaction(from, messageId, "").catch(() => {});
         return;
       }
