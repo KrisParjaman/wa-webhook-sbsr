@@ -7,6 +7,16 @@ const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
 
+// ── PostgreSQL (catalog + conversation storage) ─────────────────────
+let pgPool = null;
+try {
+  const { Pool } = require("pg");
+  pgPool = new Pool({ connectionString: process.env.POSTGRES_URL });
+  console.error("[pg] pool created");
+} catch (e) {
+  console.error("[pg] pg module not available — running without PostgreSQL:", e.message);
+}
+
 // ── Engine (v2 pipeline) ────────────────────────────────────────────
 let engineCtx = null;
 let enginePipeline = null;
@@ -50,8 +60,10 @@ let admin;
 try { admin = require("./admin.js"); }
 catch (e) {
   console.error("[admin] failed to load, using no-op stubs:", e.message);
-  admin = { logIncoming:()=>{}, logOutgoing:()=>{}, isPaused:()=>false, setPaused:()=>{}, listChats:()=>[], getChat:()=>({}), stats:()=>({}), safePhone:(p)=>String(p||"").replace(/[^0-9]/g,""), mount:()=>{} };
+  admin = { logIncoming:()=>{}, logOutgoing:()=>{}, isPaused:()=>false, setPaused:()=>{}, listChats:()=>[], getChat:()=>({}), stats:()=>({}), safePhone:(p)=>String(p||"").replace(/[^0-9]/g,""), mount:()=>{}, init:()=>{} };
 }
+// Inject PG pool into admin for dual-write to wa_messages table
+if (admin && admin.init && pgPool) admin.init(pgPool);
 function safeLog(fn, ...args) { try { const r = fn(...args); if (r && r.catch) r.catch(e => console.error("[admin] log err:", e.message)); } catch (e) { console.error("[admin] log err:", e.message); } }
 
 // --- BIKS SECURITY HARDENING (2026-05-07) ---
@@ -247,7 +259,55 @@ const RECEIPT_BASE_URL = "https://production.biks.ai/receipts/";
 const IMGBB_KEY = "7f6defdcbb8475ac203f45c966b36a78";
 const UPLOAD_DIR = "/docker/wa-webhook-sbsr/static/sentuhrasa-pdf/uploads";
 
-// --- Catalog product ID mapping (Meta API live + JSON fallback) ---
+// ── Conversation message retention (PostgreSQL) ─────────────────────
+const WA_MSG_RETENTION_DAYS = parseInt(process.env.WA_MSG_RETENTION_DAYS || "90");
+const WA_MSG_MAX_PER_PHONE  = parseInt(process.env.WA_MSG_MAX_PER_PHONE  || "500");
+
+async function ensureWaMessagesTable() {
+  if (!pgPool) return;
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS wa_messages (
+      id         BIGSERIAL PRIMARY KEY,
+      phone      TEXT NOT NULL,
+      dir        TEXT NOT NULL CHECK (dir IN ('in', 'out')),
+      text       TEXT NOT NULL DEFAULT '',
+      ts         BIGINT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await pgPool.query("CREATE INDEX IF NOT EXISTS wa_messages_phone_created ON wa_messages (phone, created_at DESC)");
+  console.error("[wa-messages] table ready");
+}
+
+async function pruneOldMessages() {
+  if (!pgPool) return;
+  try {
+    const r1 = await pgPool.query(
+      "DELETE FROM wa_messages WHERE created_at < now() - ($1 || ' days')::interval",
+      [WA_MSG_RETENTION_DAYS]
+    );
+    const r2 = await pgPool.query(
+      `DELETE FROM wa_messages WHERE id IN (
+        SELECT id FROM (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
+          FROM wa_messages
+        ) ranked WHERE rn > $1
+      )`,
+      [WA_MSG_MAX_PER_PHONE]
+    );
+    if (r1.rowCount > 0 || r2.rowCount > 0)
+      console.error("[wa-messages] pruned: " + r1.rowCount + " expired, " + r2.rowCount + " excess");
+  } catch (e) { console.error("[wa-messages] prune error:", e.message); }
+}
+
+// Start PG services
+if (pgPool) {
+  ensureWaMessagesTable()
+    .then(function() { pruneOldMessages(); setInterval(pruneOldMessages, 24 * 60 * 60 * 1000); })
+    .catch(function(e) { console.error("[wa-messages] init error:", e.message); });
+}
+
+// --- Catalog product ID mapping (PostgreSQL + Meta API live sync) ---
 const CATALOG_API_TOKEN = process.env.CATALOG_API_TOKEN || "";
 const CATALOG_ID = process.env.WA_CATALOG_ID || "1477386560782761";
 let catalogMap = {};
@@ -2978,8 +3038,23 @@ function _initEngine() {
     getCatalogMap: function() { return catalogMap; },
     getPrices: function() { return catalogPrices; },
     getAvailability: function() { return catalogAvailability; },
+    pgPool: pgPool,
     log: log,
   });
+  // Warm catalog from PostgreSQL, then start Meta API sync
+  if (catalogManager && pgPool) {
+    catalogManager.warmStoreConfig().catch(function(e) { console.error("[store-config] startup load failed:", e.message); });
+    catalogManager.loadFromDB()
+      .then(function() {
+        catalogManager.refreshCatalogFromAPI();
+        setInterval(function() { catalogManager.refreshCatalogFromAPI(); }, 5 * 60 * 1000);
+      })
+      .catch(function(e) {
+        console.error("[catalog-db] startup load failed:", e.message);
+        catalogManager.refreshCatalogFromAPI();
+        setInterval(function() { catalogManager.refreshCatalogFromAPI(); }, 5 * 60 * 1000);
+      });
+  }
   // Init agent-core
   if (agentCore) {
     agentCore.init({ sendToLLM: sendToOpenClaw, sendReply: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, catalogRef: function() { return loadProductCatalog(); } });
