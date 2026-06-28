@@ -9937,6 +9937,7 @@ async function handleMessage(msg, contacts) {
       const _preDraftForMenu = loadSbsrDraft(from) || {};
       const _activeCheckoutForMenu = isSbsrCheckoutCollectionActive(_preDraftForMenu);
       const _preStateForMenu = String(_preDraftForMenu.state || "").trim().toLowerCase();
+      let _cfRan = false; // true kalau classifier udah sukses analisis (skip isRestartIntent)
       if (isManualResetIntent(userText)) {
         log("sbsr-session", "manual_reset_triggered");
         hardResetSbsrSession(from);
@@ -10002,6 +10003,7 @@ async function handleMessage(msg, contacts) {
           const _cfResult = await classifyIntentWithLLM(
             from, userText, _preDraftForMenu, _cfBridgeCtx
           );
+          if (_cfResult) _cfRan = true; // classifier sukses analisis → skip isRestartIntent nanti
 
           if (_cfResult && _cfResult.confidence === "high") {
             // ── PATH A: Confident → eksekusi ──────────────────────
@@ -10098,7 +10100,7 @@ async function handleMessage(msg, contacts) {
           return;
         }
       }
-      if (!_activeCheckoutForMenu && isRestartIntent(userText, _preStateForMenu)) {
+      if (!_activeCheckoutForMenu && !_cfRan && isRestartIntent(userText, _preStateForMenu)) {
         if (SBSR_RESTART_PROTECTED_STATES.has(_preStateForMenu)) {
           const _fallback = getSbsrDeterministicMissingStateMessage(from, _preDraftForMenu);
           try { await sendWhatsAppMessage(from, _fallback); } catch (_) {}
