@@ -11,7 +11,12 @@ Contoh nyata dari production log:
 - `"ulang tahun"` → kena `SBSR_CANCEL_INTENT_RE` karena ada kata `ulang`, order ke-cancel
 - `"test 123, Hi kak"` → kena `SBSR_SESSION_REENTRY_RE` karena ada kata `test`
 
-**Solusi**: LLM baca natural language → output JSON intent → route ke template handler yang sesuai. Kalau classifier gagal/nggak confident → fallback ke regex pipeline yang sudah ada.
+**Solusi — Two-Pass LLM dengan Clarification Loop**:
+
+Pass 1 — LLM baca natural language → kalau confident → output JSON intent → route ke template handler.
+Pass 2 — Kalau nggak confident → LLM **nggak nebak**, tapi **tanya balik** ke customer dengan pertanyaan yang spesifik dan natural sampai dapet konteks cukup. Baru eksekusi kalau udah "high" confidence.
+
+Kalau setelah 2x tanya balik masih nggak confident → fallback ke regex pipeline.
 
 ## Architecture Overview
 
@@ -21,12 +26,79 @@ WhatsApp message masuk
 [Classifier skip check] ← skip untuk input terstruktur ("1", "ya", maps URL)
   ↓
 [LLM Classifier] ← panggil OpenClaw, minta klasifikasi intent
-  ↓ (confidence=high)              ↓ (confidence=medium/low/error)
-[Intent Router]                    [Existing Regex Pipeline]
-  ↓                                  ↓
-[Template Handler]                  [State Router + General Interceptors]
-  ↓                                  ↓
-[Kirim balasan template]            [LLM fallback main]
+  ↓
+  ├─ confidence = "high"
+  │    ↓
+  │  [Intent Router] → [Template Handler] → kirim balasan template
+  │
+  ├─ confidence = "medium"
+  │    ↓
+  │  [Clarification] ← LLM ngasih pertanyaan natural ke customer
+  │    ↓                (bukan template — natural & spesifik ke ambiguitasnya)
+  │  Customer balas
+  │    ↓
+  │  [Re-classify] ← LLM baca ulang dengan konteks tambahan
+  │    ↓
+  │    ├─ high → route ke template handler
+  │    └─ masih medium (retry ke-2) → fallback ke regex pipeline
+  │
+  └─ confidence = "low" atau error
+       ↓
+     [Existing Regex Pipeline] → State Router → LLM fallback main
+```
+
+## Clarification Loop — Detail
+
+### Kenapa perlu?
+
+Contoh kasus dari production:
+- Customer: `"risol mayo"` — ini `place_order` (mau pesan smoked beef mayo) atau `ask_question` (nanya "ada risol mayo nggak?")? Tanpa konteks, classifier bisa salah.
+- Customer: `"jokowi"` — ini `provide_name` atau `general_chat` (joke)? Tergantung state sebelumnya.
+- Customer: `"oke deh"` — ini `confirm` (setuju lanjut) atau `general_chat` (ngobrol santai)?
+
+### Behaviour per confidence level
+
+| Confidence | Behaviour |
+|---|---|
+| `high` | Langsung route ke template handler. Tidak perlu tanya balik. |
+| `medium` | **JANGAN eksekusi**. LLM kasih pertanyaan klarifikasi natural ke customer. Simpan ke `pending_clarification`. Customer balas → re-classify dengan konteks tambahan. Max 2x tanya balik. |
+| `low` | Fallback ke regex pipeline. LLM nggak cukup yakin buat spekulasi. |
+
+### Contoh clarification (medium confidence)
+
+| Customer bilang | Classifier output | Bot balas |
+|---|---|---|
+| `"risol mayo"` | `{intent:"unknown", confidence:"medium", clarification:"Maksudnya Kakak mau **pesan** risol smoked beef mayo atau cuma **tanya** harganya dulu? 🤍"}` | Kirim clarification |
+| `"jokowi"` (state=awaiting_name) | `{intent:"unknown", confidence:"medium", clarification:"Itu nama penerima pesanannya ya Kak? Boleh diketik ulang nama lengkapnya 🤍"}` | Kirim clarification |
+| `"delivery aja"` (state=awaiting_product_selection) | `{intent:"unknown", confidence:"medium", clarification:"Kak, sebelum pilih pengiriman, pilih dulu varian risolnya ya. Mau yang mana? 🤍"}` | Kirim clarification |
+
+### Counter & max retries
+
+- Setiap kali classifier balik `medium` dengan clarification → increment `_clarifyCount`
+- Kalau `_clarifyCount >= 2` → jangan tanya lagi, fallback ke regex pipeline
+- Counter di-reset setiap kali classifier balik `high` (customer udah jelas)
+
+## Updated Classifier Output Format
+
+```json
+// confidence = high → route langsung
+{
+  "intent": "place_order",
+  "confidence": "high"
+}
+
+// confidence = medium → kasih pertanyaan klarifikasi
+{
+  "intent": "unknown",
+  "confidence": "medium",
+  "clarification": "Maksudnya mau pesan smoked beef mayo atau tanya dulu Kak? 🤍"
+}
+
+// confidence = low → fallback
+{
+  "intent": "unknown",
+  "confidence": "low"
+}
 ```
 
 ## Intent Taxonomy (15 intents)
@@ -127,10 +199,33 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     "reset — minta reset/mulai ulang. Contoh: 'reset', 'mulai dari awal', 'start over'",
     "",
     "=== FORMAT OUTPUT (JSON SAJA, tanpa markdown) ===",
+    "Kalau kamu YAKIN dengan intent-nya:",
     "{",
     '  "intent": "<salah satu dari daftar di atas>",',
-    '  "confidence": "high" | "medium" | "low"',
+    '  "confidence": "high"',
     "}",
+    "",
+    "Kalau kamu RAGU (ada beberapa kemungkinan):",
+    "{",
+    '  "intent": "unknown",',
+    '  "confidence": "medium",',
+    '  "clarification": "<pertanyaan natural dalam Bahasa Indonesia untuk memperjelas maksud customer>"',
+    "}",
+    "",
+    "Kalau kamu SANGAT TIDAK YAKIN (nggak bisa nebak sama sekali):",
+    "{",
+    '  "intent": "unknown",',
+    '  "confidence": "low"',
+    "}",
+    "",
+    "ATURAN CLARIFICATION:",
+    "- Tanya dengan ramah & natural — seperti manusia, bukan robot.",
+    "- Jangan terlalu panjang (maks 2 kalimat pendek).",
+    "- Langsung ke intinya — tanya apa yang ambigu.",
+    "- JANGAN sebut kata 'intent', 'classifier', 'confidence', atau 'sistem'.",
+    "- Akhiri dengan emoji 🤍 supaya tetap warm.",
+    "- Contoh bagus: 'Maksudnya Kakak mau pesan atau cuma tanya harga dulu? 🤍'",
+    "- Contoh jelek: 'Intent tidak terdeteksi. Harap klarifikasi maksud Anda.'",
     "",
     "=== PESAN CUSTOMER ===",
     userText,
@@ -214,8 +309,13 @@ async function classifyIntentWithLLM(from, userText, draft, bridgeContext) {
       ? parsed.confidence
       : "medium";
 
-    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence);
-    return { intent: parsed.intent, confidence };
+    const clarification = (confidence === "medium" && parsed.clarification)
+      ? String(parsed.clarification).trim()
+      : null;
+
+    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence +
+        (clarification ? " clarify=" + clarification.slice(0, 50) : ""));
+    return { intent: parsed.intent, confidence, clarification };
 
   } catch (err) {
     log("llm-classifier", "error=" + err.message);
@@ -393,7 +493,29 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
 }
 ```
 
-## Step 5: Insertion Point
+## Step 4b: Clarification Counter (di draft)
+
+Simpan counter di draft field `_clarify_count`. Reset ke 0 setiap kali classifier balik `high`.
+
+```javascript
+function getClarifyCount(draft) {
+  return Number(draft?._clarify_count) || 0;
+}
+function resetClarifyCount(from) {
+  const d = loadSbsrDraft(from) || {};
+  if (d._clarify_count) {
+    saveSbsrDraft(from, { ...d, _clarify_count: 0 });
+  }
+}
+function incrementClarifyCount(from) {
+  const d = loadSbsrDraft(from) || {};
+  const n = getClarifyCount(d) + 1;
+  saveSbsrDraft(from, { ...d, _clarify_count: n });
+  return n;
+}
+```
+
+## Step 5: Insertion Point (updated pipeline logic with clarification loop)
 
 Cari baris ini di server.js (function `handleMessage`, sekitar line 9577):
 
@@ -407,14 +529,17 @@ Cari baris ini di server.js (function `handleMessage`, sekitar line 9577):
 ...active checkout guard block...
 
       // === LLM-FIRST INTENT CLASSIFIER ===  ← SISIPKAN DARI SINI
-      if (SBSR_LLM_CLASSIFIER) {
+      if (sbsrLlmClassifierEnabled) {
         let _cfHandled = false;
         try {
           const _cfBridgeCtx = consumePendingBridgeContext(from);
           const _cfResult = await classifyIntentWithLLM(
             from, userText, _preDraftForMenu, _cfBridgeCtx
           );
+
           if (_cfResult && _cfResult.confidence === "high") {
+            // ── PATH A: Confident → eksekusi ──────────────────
+            resetClarifyCount(from);  // reset counter karena udah jelas
             log("llm-classifier", "HANDLED intent=" + _cfResult.intent);
             _cfHandled = await routeClassifiedIntent(from, userText, _cfResult.intent, messageId);
             if (_cfHandled) {
@@ -422,11 +547,35 @@ Cari baris ini di server.js (function `handleMessage`, sekitar line 9577):
               return;
             }
             log("llm-classifier", "route_false — fallthrough to regex");
+
+          } else if (_cfResult && _cfResult.confidence === "medium" && _cfResult.clarification) {
+            // ── PATH B: Ragu → tanya balik (clarification loop) ──
+            const _clarifyCount = incrementClarifyCount(from);
+            log("llm-classifier", "CLARIFY #" + _clarifyCount + " intent=" + _cfResult.intent +
+                " q=" + _cfResult.clarification.slice(0, 60));
+            if (_clarifyCount >= 3) {
+              // Max retries reached — jangan tanya terus, fallback
+              log("llm-classifier", "max_clarify_reached — fallthrough to regex");
+            } else {
+              // Kirim pertanyaan klarifikasi ke customer
+              await sendWhatsAppMessage(from, _cfResult.clarification);
+              // Simpan ke bridge context biar LLM inget pas re-classify
+              setPendingBridgeContext(from, [
+                "Classifier sebelumnya ragu dengan pesan customer.",
+                "Bot sudah tanya: \"" + _cfResult.clarification + "\"",
+                "Sekarang tunggu jawaban customer untuk re-klasifikasi.",
+              ].join("\n"));
+              sendReaction(from, messageId, "").catch(() => {});
+              return;  // JANGAN fallback — tunggu customer jawab
+            }
+
           } else if (_cfResult) {
-            log("llm-classifier", "low_conf intent=" + _cfResult.intent + " conf=" + _cfResult.confidence + " — fallthrough");
+            // ── PATH C: Low confidence → fallback ─────────────
+            log("llm-classifier", "low_conf intent=" + _cfResult.intent +
+                " conf=" + _cfResult.confidence + " — fallthrough to regex");
           }
         } catch (_cfErr) {
-          log("llm-classifier", "error=" + _cfErr.message + " — fallthrough");
+          log("llm-classifier", "error=" + (_cfErr && _cfErr.message || "?") + " — fallthrough to regex");
         }
       }
       // === END LLM-FIRST INTENT CLASSIFIER ===  ← SAMPAI SINI
@@ -448,11 +597,13 @@ SBSR_LLM_CLASSIFIER=1
 
 ## Safety Mechanisms
 
-1. **Confidence gate**: Hanya `confidence: "high"` yang di-route ke template handler. Medium/low → fall through ke regex
-2. **4-second timeout**: Kalau classifier lemot, fall through ke regex (no regression)
-3. **Skip list**: Input terstruktur ("1", "ya", "ok") skip classifier — regex udah sempurna buat ini
-4. **JSON parse error handling**: Gagal parse → null → fall through
-5. **OpenClaw down**: Exception → catch → fall through
+1. **Clarification loop**: `medium` confidence → LLM tanya balik, bukan nebak. Max 3x tanya.
+2. **Confidence gate**: Hanya `high` yang langsung route ke template. `low` → regex.
+3. **4-second timeout**: Kalau classifier lemot, fall through ke regex (no regression).
+4. **Skip list**: Input terstruktur ("1", "ya", "ok") skip classifier — regex udah sempurna buat ini.
+5. **JSON parse error handling**: Gagal parse → null → fall through.
+6. **OpenClaw down**: Exception → catch → fall through.
+7. **Environment toggle**: `SBSR_LLM_CLASSIFIER=0` → semua classifier logic di-skip.
 6. **Environment toggle**: `SBSR_LLM_CLASSIFIER=0` → semua classifier logic di-skip, identik dengan behaviour sebelum perubahan ini
 7. **Existing code unchanged**: Semua regex, state router, general interceptors, dan main LLM fallback tetap jalan
 
