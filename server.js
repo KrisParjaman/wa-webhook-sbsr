@@ -7361,12 +7361,13 @@ const SBSR_ADD_MORE_DECLINE_RE = /^(?:2|tidak|gak|ga|nggak|no|lanjut\s+pembayara
 
 // ── LLM-FIRST INTENT CLASSIFIER CONFIG ─────────────────────────────
 let sbsrLlmClassifierEnabled = process.env.SBSR_LLM_CLASSIFIER !== "0"; // default ON, toggle via /classifier_on|off
-const CLASSIFIER_TIMEOUT_MS = 10000; // 10 detik — OpenClaw response rata-rata 4-9s, classifier prompt panjang
+const CLASSIFIER_TIMEOUT_MS = 15000; // 15 detik — classifier prompt panjang (~75 baris), LLM butuh waktu
 const CLASSIFIER_VALID_INTENTS = new Set([
   "greeting", "request_menu", "place_order", "cancel_order",
   "confirm", "deny", "provide_name", "provide_address",
   "provide_location", "choose_option", "ask_question",
-  "add_more", "change_order", "general_chat", "reset"
+  "add_more", "change_order", "general_chat", "reset",
+  "unknown" // untuk medium/low confidence (clarification / fallback)
 ]);
 const CLASSIFIER_SKIP_RE = /^(?:ok|oke|okay|ya|iya|tidak|gak|nggak|no|yes|sip|siap|deal|lanjut|sudah|1|2|3|4|\d+)\s*$/i;
 const CLASSIFIER_MAPS_SKIP_RE = /^https?:\/\/.*(?:google\.com\/maps|maps\.google|goo\.gl\/maps|maps\.app\.goo\.gl)/i;
@@ -9159,24 +9160,23 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     "=== KONTEKS PERCAKAPAN ===",
     bridgeContext || "(tidak ada — ini pesan pertama atau setelah reset)",
     "",
-    "=== DAFTAR INTENT ===",
-    "Pilih SATU intent yang paling tepat:",
+    "=== DAFTAR INTENT (pilih SATU) ===",
     "",
-    "greeting — customer menyapa. Contoh: 'halo', 'pagi', 'assalamualaikum', 'test 123'",
-    "request_menu — minta lihat menu/katalog. Contoh: 'menu dong', 'kirim katalognya', 'ada varian apa?'",
-    "place_order — mau pesan/order produk. Contoh: 'mau risol 6pcs ayam sayur', 'order dong', 'beli frozen'",
-    "cancel_order — membatalkan pesanan. Contoh: 'cancel', 'batalin ya', 'ga jadi mesen'",
-    "confirm — konfirmasi setuju/lanjut. Contoh: 'ya', 'ok', 'sip', 'lanjut', 'betul', 'gass'",
-    "deny — menolak/tidak setuju. Contoh: 'tidak', 'gak', 'salah', 'bukan', 'nggak jadi'",
-    "provide_name — memberikan nama. Contoh: 'atas nama Budi', 'saya Andi', 'jokowi'",
-    "provide_address — memberikan alamat teks. Contoh: 'Jl Merdeka No 12', 'Perum Citra Blok A'",
-    "provide_location — share Google Maps URL atau WhatsApp location pin",
-    "choose_option — memilih dari opsi yang ditawarkan. Contoh: '1', 'delivery', 'goreng', 'paxel'",
-    "ask_question — bertanya tentang produk/harga/cara pesan. Contoh: 'halal ga?', 'ongkir berapa?'",
-    "add_more — mau tambah pesanan. Contoh: 'nambah dong', 'tambah chili sauce'",
-    "change_order — mau ubah/ganti/revisi pesanan. Contoh: 'ganti varian', 'ubah jadi frozen'",
-    "general_chat — percakapan di luar konteks pemesanan. Contoh: 'gimana kabar?', joke, spam, curhat",
-    "reset — minta reset/mulai ulang. Contoh: 'reset', 'mulai dari awal', 'start over'",
+    "greeting: menyapa (halo, pagi, assalamualaikum)",
+    "request_menu: minta menu/katalog (menu dong, lihat katalog)",
+    "place_order: mau pesan/order (mau risol 6pcs, order dong, beli frozen)",
+    "cancel_order: batalkan pesanan (cancel, batalin, ga jadi mesen)",
+    "confirm: konfirmasi setuju (ya, ok, sip, lanjut, betul, gass)",
+    "deny: menolak (tidak, gak, salah, bukan, nggak jadi)",
+    "provide_name: kasih nama (atas nama Budi, saya Andi)",
+    "provide_address: kasih alamat teks (Jl Merdeka No 12, Perum Citra)",
+    "provide_location: share Google Maps URL atau WA location pin",
+    "choose_option: pilih dari opsi (1, delivery, goreng, paxel)",
+    "ask_question: tanya produk/harga (halal ga?, ongkir berapa?)",
+    "add_more: tambah pesanan (nambah dong, tambah chili sauce)",
+    "change_order: ubah/revisi pesanan (ganti varian, ubah jadi frozen)",
+    "general_chat: ngobrol di luar konteks order (gimana kabar?, curhat)",
+    "reset: minta reset/mulai ulang (reset, mulai dari awal, start over)",
     "",
     "=== FORMAT OUTPUT (JSON SAJA, tanpa markdown) ===",
     "Kalau kamu YAKIN dengan intent-nya:",
@@ -9199,13 +9199,10 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
     "}",
     "",
     "ATURAN CLARIFICATION:",
-    "- Tanya dengan ramah & natural — seperti manusia, bukan robot.",
-    "- Jangan terlalu panjang (maks 2 kalimat pendek).",
+    "- Tanya ramah & natural, maks 2 kalimat pendek, akhiri emoji 🤍.",
     "- Langsung ke intinya — tanya apa yang ambigu.",
     "- JANGAN sebut kata 'intent', 'classifier', 'confidence', atau 'sistem'.",
-    "- Akhiri dengan emoji \u{1f90d} supaya tetap warm.",
-    "- Contoh bagus: 'Maksudnya Kakak mau pesan atau cuma tanya harga dulu? \u{1f90d}'",
-    "- Contoh jelek: 'Intent tidak terdeteksi. Harap klarifikasi maksud Anda.'",
+    "- Contoh: 'Maksudnya Kakak mau pesan atau cuma tanya harga dulu? 🤍'",
     "",
     "=== PESAN CUSTOMER ===",
     userText,
