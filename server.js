@@ -9149,8 +9149,8 @@ async function llmFirstRouter(from, text, draft) {
 // ═══════════════════════════════════════════════════════════════════
 
 // ── Natural Reply Generator ────────────────────────────────────────
-// Ganti template response dengan LLM-generated conversational reply.
-// LLM tahu katalog + state + intent — tapi TIDAK hitung cart.
+// LLM generates conversational reply + extracts structured order data.
+// Returns { reply, items, use_case_hint } or null.
 async function generateClassifierReply(from, userText, intent, draft) {
   const state = String(draft?.state || "none").trim().toLowerCase();
   const customerName = String(draft?.customer_name || "");
@@ -9185,6 +9185,16 @@ async function generateClassifierReply(from, userText, intent, draft) {
     "- Kalau customer sebut produk spesifik (misal 'ayam sayur', 'smoked beef'), acknowledge dan bantu pilih form (goreng/frozen).",
     "- Keep it short & natural (2-4 kalimat), akhiri dengan emoji 🤍",
     "",
+    "=== EKSTRAK ITEM (kalau customer sebut produk + quantity) ===",
+    "Output HARUS JSON. Kalau customer sebut produk spesifik, ekstrak juga items-nya:",
+    "{",
+    '  "reply": "<balasan natural ke customer>",',
+    '  "items": [{"name": "Ayam Sayur", "qty": 3}, {"name": "Smoked Beef Mayo", "qty": 3}]  // atau []',
+    '  "use_case_hint": "goreng"  // "goreng", "frozen", atau null',
+    "}",
+    "Kalau customer TIDAK sebut produk spesifik, items = [].",
+    "Deteksi use_case_hint dari kata 'makan langsung'/'goreng'/'siap makan' → 'goreng', 'frozen'/'stok'/'mentah' → 'frozen'.",
+    "",
     "=== PESAN CUSTOMER ===",
     userText,
   ].join("\n");
@@ -9192,7 +9202,20 @@ async function generateClassifierReply(from, userText, intent, draft) {
   try {
     const raw = await sendToOpenClaw("reply-" + Date.now() + "-" + from, prompt);
     if (raw && String(raw).trim()) {
-      return String(raw).trim();
+      let cleaned = String(raw).trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```\s*$/i, "");
+      try {
+        const parsed = JSON.parse(cleaned);
+        return {
+          reply: String(parsed.reply || "").trim(),
+          items: Array.isArray(parsed.items) ? parsed.items : [],
+          use_case_hint: parsed.use_case_hint || null,
+        };
+      } catch (_) {
+        // Fallback: treat whole response as reply text
+        return { reply: cleaned, items: [], use_case_hint: null };
+      }
     }
   } catch (e) {
     log("llm-reply", "generate_failed: " + (e && e.message || "?"));
@@ -9396,10 +9419,21 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
           saveSbsrDraft(from, { ...d, state: "awaiting_usecase" });
           _replyDraft = { ...d, state: "awaiting_usecase" };
         }
-        // LLM natural reply — tanpa auto-catalog
-        const _reply = await generateClassifierReply(from, userText, "place_order", _replyDraft);
-        if (_reply) {
-          await sendWhatsAppMessage(from, _reply);
+        // LLM natural reply + extract items
+        const _result = await generateClassifierReply(from, userText, "place_order", _replyDraft);
+        if (_result && _result.reply) {
+          await sendWhatsAppMessage(from, _result.reply);
+          // Save extracted items to draft so next message remembers them
+          if (_result.items && _result.items.length > 0) {
+            const _d = loadSbsrDraft(from) || {};
+            saveSbsrDraft(from, { ..._d, pending_items: _result.items });
+            log("llm-classifier", "extracted_items=" + JSON.stringify(_result.items.map(i => i.qty + "x " + i.name)));
+          }
+          if (_result.use_case_hint && !_replyDraft.use_case) {
+            const _d2 = loadSbsrDraft(from) || {};
+            saveSbsrDraft(from, { ..._d2, use_case: _result.use_case_hint });
+            log("llm-classifier", "use_case_hint=" + _result.use_case_hint);
+          }
           log("llm-classifier", "natural_reply intent=place_order prev_state=" + state + " new_state=" + (_replyDraft.state || "?"));
           return true;
         }
