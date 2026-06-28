@@ -17,6 +17,7 @@ let draftStore = null;
 let gsheetSync = null;
 let stateManager = null;
 let mapsGeocode = null;
+let llmClassifier = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -27,6 +28,7 @@ try {
   gsheetSync = require("./lib/gsheet-sync.cjs");
   stateManager = require("./lib/state-manager.cjs");
   mapsGeocode = require("./lib/maps-geocode.cjs");
+  llmClassifier = require("./lib/llm-classifier.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -4541,17 +4543,9 @@ const CLASSIFIER_MAPS_SKIP_RE = /^https?:\/\/.*(?:google\.com\/maps|maps\.google
 const CLASSIFIER_MAX_CLARIFY = 3; // max tanya balik sebelum fallback ke regex
 
 // Clarification counter — disimpan di draft._clarify_count
-function getClarifyCount(draft) { return Number(draft?._clarify_count) || 0; }
-function resetClarifyCount(from) {
-  const d = loadSbsrDraft(from) || {};
-  if (d._clarify_count) { saveSbsrDraft(from, { ...d, _clarify_count: 0 }); }
-}
-function incrementClarifyCount(from) {
-  const d = loadSbsrDraft(from) || {};
-  const n = getClarifyCount(d) + 1;
-  saveSbsrDraft(from, { ...d, _clarify_count: n });
-  return n;
-}
+function getClarifyCount() { return llmClassifier ? llmClassifier.getClarifyCount.apply(null, arguments) : null; }
+function resetClarifyCount() { return llmClassifier ? llmClassifier.resetClarifyCount.apply(null, arguments) : null; }
+function incrementClarifyCount() { return llmClassifier ? llmClassifier.incrementClarifyCount.apply(null, arguments) : null; }
 
 const SBSR_RESTART_PROTECTED_STATES = new Set([
   "awaiting_invoice_confirm",
@@ -5493,23 +5487,7 @@ const LLM_FIRST_STATES_INIT = new Set([
   'awaiting_finance',
 ]);
 
-async function llmFirstRouter(from, text, draft) {
-  const state = String(draft?.state || '').toLowerCase();
-  if (!LLM_FIRST_STATES_INIT.has(state) && !LLM_FIRST_STATES_INIT.has(draft?.state)) return null;
-  if (/^(ok|ya|sudah|lanjut|iya|done|siap|yes|no|enggak|ga|gak)$/i.test(text.trim())) return null;
-  try {
-    const cart = draft?.cart || [];
-    const ctx = 'Kamu adalah Mintu, CS ramah Sentuh Rasa (risoles frozen & goreng).\nStatus: state=' + state + ' nama=' + (draft?.customer_name||'') + ' usecase=' + (draft?.usecase||'') + ' cart=' + (cart.length ? JSON.stringify(cart) : 'kosong') + '\n\nRESPON JSON: {intent, response_text (natural Indo), extracted_data, confidence}\n\nPesan: ' + text;
-    const result = await sendToOpenClaw(from, ctx);
-    if (!result) return null;
-    const cleaned = result.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    if (!parsed || !parsed.intent || (parsed.confidence || 0) < 0.6) return null;
-    return parsed;
-  } catch (err) {
-    return null;
-  }
-}
+function llmFirstRouter() { return llmClassifier ? llmClassifier.llmFirstRouter.apply(null, arguments) : null; }
 
 // ═══════════════════════════════════════════════════════════════════
 // LLM-FIRST INTENT CLASSIFIER
@@ -5518,234 +5496,11 @@ async function llmFirstRouter(from, text, draft) {
 // ── Natural Reply Generator ────────────────────────────────────────
 // LLM generates conversational reply + extracts structured order data.
 // Returns { reply, items, use_case_hint } or null.
-async function generateClassifierReply(from, userText, intent, draft) {
-  const state = String(draft?.state || "none").trim().toLowerCase();
-  const customerName = String(draft?.customer_name || "");
-  const useCase = String(draft?.use_case || "");
-  const deliveryMode = String(draft?.delivery_mode || "");
-  const items = Array.isArray(draft?.items) ? draft.items : [];
-  const cartSummary = items.length > 0
-    ? items.map(it => (it.qty || 1) + "x " + (it.name || "?") + " (" + (it.form || "?") + ")").join(", ")
-    : "(kosong)";
+function generateClassifierReply() { return llmClassifier ? llmClassifier.generateClassifierReply.apply(null, arguments) : null; }
 
-  const prompt = [
-    "Kamu adalah Mintu, CS ramah dari Sentuh Rasa — Risoles Otentik.",
-    "Tugasmu: balas customer dengan NATURAL, WARM, dan HELPFUL. Bukan template/robot.",
-    "",
-    "=== KONTEKS ===",
-    "State: " + state,
-    "Intent customer (dari classifier): " + intent,
-    "Nama customer: " + (customerName || "(belum diisi)"),
-    "Use case: " + (useCase || "(belum dipilih)"),
-    "Delivery: " + (deliveryMode || "(belum dipilih)"),
-    "Isi cart: " + cartSummary,
-    "Pending items (customer udah sebut tapi belum dikonfirmasi): " + JSON.stringify(draft?.pending_items || []),
-    "",
-    "=== ATURAN PENTING ===",
-    "- JANGAN hitung total/cart/kalkulasi — sistem yang handle.",
-    "- JANGAN sebut kata 'intent', 'classifier', 'state', 'sistem'.",
-    "- Kalau state=awaiting_usecase: tanya customer mau makan langsung / frozen / meeting / gift.",
-    "- Kalau state=awaiting_product_selection: bantu customer pilih varian dari katalog.",
-    "- Kalau state=awaiting_name: minta nama penerima.",
-    "- Kalau state=awaiting_address: minta alamat lengkap.",
-    "- Kalau state=awaiting_delivery_method: suruh pilih delivery / pickup.",
-    "- JANGAN kirim katalog WA kecuali customer minta EXPLICIT.",
-    "- Kalau customer sebut produk spesifik (misal 'ayam sayur', 'smoked beef'), acknowledge dan bantu pilih form (goreng/frozen).",
-    "- Kalau ada pending_items: SEBUTKAN itemnya dan TANYA apakah sudah benar. JANGAN tawarin ulang semua produk.",
-    "- Kalau customer pilih usecase (makan langsung/frozen) + ada pending_items: KONFIRMASI pesanan dan ARAHKAN ke 'Ya, lanjut pesan'.",
-    "- Keep it short & natural (2-4 kalimat), akhiri dengan emoji 🤍",
-    "",
-    "=== EKSTRAK ITEM (kalau customer sebut produk + quantity) ===",
-    "Output HARUS JSON. Kalau customer sebut produk spesifik, ekstrak juga items-nya:",
-    "{",
-    '  "reply": "<balasan natural ke customer>",',
-    '  "items": [{"name": "Ayam Sayur", "qty": 3}, {"name": "Smoked Beef Mayo", "qty": 3}]  // atau []',
-    '  "use_case_hint": "goreng"  // "goreng", "frozen", atau null',
-    "}",
-    "Kalau customer TIDAK sebut produk spesifik, items = [].",
-    "Deteksi use_case_hint dari kata 'makan langsung'/'goreng'/'siap makan' → 'goreng', 'frozen'/'stok'/'mentah' → 'frozen'.",
-    "",
-    "=== PESAN CUSTOMER ===",
-    userText,
-  ].join("\n");
+function buildClassifierPrompt() { return llmClassifier ? llmClassifier.buildClassifierPrompt.apply(null, arguments) : null; }
 
-  try {
-    const raw = await sendToOpenClaw("reply-" + Date.now() + "-" + from, prompt);
-    if (raw && String(raw).trim()) {
-      let cleaned = String(raw).trim()
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/\s*```\s*$/i, "");
-      try {
-        const parsed = JSON.parse(cleaned);
-        return {
-          reply: String(parsed.reply || "").trim(),
-          items: Array.isArray(parsed.items) ? parsed.items : [],
-          use_case_hint: parsed.use_case_hint || null,
-        };
-      } catch (_) {
-        // Fallback: treat whole response as reply text
-        return { reply: cleaned, items: [], use_case_hint: null };
-      }
-    }
-  } catch (e) {
-    log("llm-reply", "generate_failed: " + (e && e.message || "?"));
-  }
-  return null;
-}
-
-function buildClassifierPrompt(from, userText, draft, bridgeContext) {
-  const state = String(draft?.state || "none").trim().toLowerCase();
-  const customerName = String(draft?.customer_name || "");
-  const useCase = String(draft?.use_case || "");
-  const deliveryMode = String(draft?.delivery_mode || "");
-  const items = Array.isArray(draft?.items) ? draft.items : [];
-  const cartSummary = items.length > 0
-    ? items.map(it => (it.qty || 1) + "x " + (it.name || "?") + " (" + (it.form || "?") + ")").join(", ")
-    : "(kosong)";
-
-  return [
-    "Kamu adalah classifier intent chat untuk toko Risol Sentuh Rasa.",
-    "Tugasmu HANYA mengklasifikasikan intent pesan customer dalam Bahasa Indonesia.",
-    "JANGAN menghasilkan teks balasan — output JSON SAJA.",
-    "",
-    "=== STATUS PELANGGAN ===",
-    "State saat ini: " + state,
-    "Nama: " + (customerName || "(belum diisi)"),
-    "Use case: " + (useCase || "(belum dipilih)"),
-    "Delivery mode: " + (deliveryMode || "(belum dipilih)"),
-    "Isi cart: " + cartSummary,
-    "",
-    "=== KONTEKS PERCAKAPAN ===",
-    bridgeContext || "(tidak ada — ini pesan pertama atau setelah reset)",
-    "",
-    "=== DAFTAR INTENT (pilih SATU) ===",
-    "PENTING — STATE AWARE:",
-    "- State=awaiting_usecase: customer sedang memilih use case. 'makan langsung', 'frozen', 'stok', 'meeting', 'gift', 'hampers' → choose_option.",
-    "- State=awaiting_product_selection: customer sedang pilih produk → choose_option atau place_order. TAPI 'lanjut pesan', 'lanjutkan', 'proses', 'ya lanjut', 'ok lanjut', 'cek out', 'checkout' → confirm.",
-    "- Kalau pesan mengandung alamat lengkap (jalan, nomor, kota) → langsung provide_address HIGH.",
-    "- Kalau ada nama+alamat sekaligus → tetap provide_address (bukan unknown/medium).",
-    "",
-    "greeting: menyapa (halo, pagi, assalamualaikum)",
-    "request_menu: minta menu/katalog/pricelist (menu dong, kirim katalog, pricelist, daftar harga, lihat menu)",
-    "place_order: mau pesan/order (mau risol 6pcs, order dong, beli frozen)",
-    "cancel_order: batalkan pesanan (cancel, batalin, ga jadi mesen)",
-    "confirm: konfirmasi setuju (ya, ok, sip, lanjut, betul, gass)",
-    "deny: menolak (tidak, gak, salah, bukan, nggak jadi)",
-    "provide_name: kasih nama (atas nama Budi, saya Andi, nama Revaldy)",
-    "provide_address: kasih alamat teks — PRIORITAS kalau text mengandung alamat lengkap (Jl Merdeka No 12, Jalan BPK, Perum Citra, Blok A). Kalau ada nama+alamat sekaligus → tetap provide_address.",
-    "provide_location: share Google Maps URL atau WA location pin",
-    "choose_option: pilih dari opsi (1, delivery, goreng, paxel)",
-    "ask_question: tanya spesifik produk/harga/cara pesan (halal ga?, ongkir berapa?, berapa harga X?) — BUKAN minta pricelist/menu",
-    "add_more: tambah pesanan (nambah dong, tambah chili sauce)",
-    "change_order: ubah/revisi pesanan (ganti varian, ubah jadi frozen)",
-    "general_chat: ngobrol di luar konteks order (gimana kabar?, curhat)",
-    "reset: minta reset/mulai ulang (reset, mulai dari awal, start over)",
-    "",
-    "=== FORMAT OUTPUT (JSON SAJA, tanpa markdown) ===",
-    "Kalau kamu YAKIN dengan intent-nya:",
-    "{",
-    "  \"intent\": \"<salah satu dari daftar di atas>\",",
-    "  \"confidence\": \"high\"",
-    "}",
-    "",
-    "Kalau kamu RAGU (ada beberapa kemungkinan):",
-    "{",
-    "  \"intent\": \"unknown\",",
-    "  \"confidence\": \"medium\",",
-    "  \"clarification\": \"<pertanyaan natural dalam Bahasa Indonesia untuk memperjelas maksud customer>\"",
-    "}",
-    "",
-    "Kalau kamu SANGAT TIDAK YAKIN:",
-    "{",
-    "  \"intent\": \"unknown\",",
-    "  \"confidence\": \"low\"",
-    "}",
-    "",
-    "ATURAN CLARIFICATION:",
-    "- Tanya ramah & natural, maks 2 kalimat pendek, akhiri emoji 🤍.",
-    "- Langsung ke intinya — tanya apa yang ambigu.",
-    "- JANGAN sebut kata 'intent', 'classifier', 'confidence', atau 'sistem'.",
-    "- Contoh: 'Maksudnya Kakak mau pesan atau cuma tanya harga dulu? 🤍'",
-    "",
-    "=== PESAN CUSTOMER ===",
-    userText,
-  ].join("\n");
-}
-
-async function classifyIntentWithLLM(from, userText, draft, bridgeContext) {
-  const t = String(userText || "").trim();
-
-  if (CLASSIFIER_SKIP_RE.test(t)) {
-    log("llm-classifier", "skip_structured text=" + t.slice(0, 30));
-    return null;
-  }
-  if (CLASSIFIER_MAPS_SKIP_RE.test(t)) {
-    log("llm-classifier", "skip_maps_url");
-    return null;
-  }
-  if (t.length < 3) {
-    log("llm-classifier", "skip_short len=" + t.length);
-    return null;
-  }
-  if (t.length > 500) {
-    log("llm-classifier", "skip_long len=" + t.length);
-    return null;
-  }
-
-  const prompt = buildClassifierPrompt(from, userText, draft, bridgeContext);
-
-  try {
-    const raw = await Promise.race([
-      sendToOpenClaw("intent-" + Date.now() + "-" + from, prompt),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Classifier timeout")), CLASSIFIER_TIMEOUT_MS)
-      ),
-    ]);
-
-    if (!raw || !String(raw).trim()) {
-      log("llm-classifier", "empty_response");
-      return null;
-    }
-
-    let cleaned = String(raw).trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/i, "");
-
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (_) {
-      const m = cleaned.match(/\{[\s\S]*"intent"[\s\S]*\}/);
-      if (m) {
-        try { parsed = JSON.parse(m[0]); } catch (__) { /* ignore */ }
-      }
-      if (!parsed) {
-        log("llm-classifier", "json_parse_failed raw=" + cleaned.slice(0, 100));
-        return null;
-      }
-    }
-
-    if (!parsed || !CLASSIFIER_VALID_INTENTS.has(parsed.intent)) {
-      log("llm-classifier", "invalid_intent=" + (parsed?.intent || "?"));
-      return null;
-    }
-
-    const confidence = ["high", "medium", "low"].includes(parsed.confidence)
-      ? parsed.confidence
-      : "medium";
-
-    const clarification = (confidence === "medium" && parsed.clarification)
-      ? String(parsed.clarification).trim()
-      : null;
-
-    log("llm-classifier", "result intent=" + parsed.intent + " conf=" + confidence +
-        (clarification ? " clarify=" + clarification.slice(0, 60) : ""));
-    return { intent: parsed.intent, confidence, clarification };
-  } catch (err) {
-    log("llm-classifier", "error=" + (err && err.message || "?"));
-    return null;
-  }
-}
+function classifyIntentWithLLM() { return llmClassifier ? llmClassifier.classifyIntentWithLLM.apply(null, arguments) : null; }
 
 async function routeClassifiedIntent(from, userText, intent, messageId) {
   const draft = loadSbsrDraft(from) || { phone: from };
@@ -6036,6 +5791,8 @@ function _initEngine() {
     getAvailability: function() { return catalogAvailability; },
     log: log,
   });
+  // Init llm-classifier
+  if (llmClassifier) llmClassifier.init({ log: log, sendToOpenClaw: sendToOpenClaw, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft });
   // Init maps-geocode
   if (mapsGeocode) mapsGeocode.init({ log: log });
   // Init state-manager
