@@ -10186,9 +10186,20 @@ async function handleMessage(msg, contacts) {
           // Parse price from summary: "totalnya Rp110.000" or "Rp110.000 ya"
           const _priceM = _summary.match(/Rp\s*([\d.]+)/);
           const _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
-          // Detect variant: "Mix X pcs" → determine pack_size
+          // Detect pack size: "Mix 6 pcs" → 6, atau hitung semua "Xpcs" mentions
           const _mixM = _summary.match(/Mix\s+(\d+)\s*pcs/i);
-          const _pack = _mixM ? parseInt(_mixM[1], 10) : 12;
+          let _pack;
+          if (_mixM) {
+            _pack = parseInt(_mixM[1], 10);
+          } else {
+            // Count all "X pcs" (e.g. "Ayam Sayur 3pcs + Ragout 3pcs" → 6)
+            const _pcsRe = /(\d+)\s*pcs/gi;
+            let _total = 0, _m;
+            while ((_m = _pcsRe.exec(_summary)) !== null) {
+              _total += parseInt(_m[1], 10);
+            }
+            _pack = _total > 0 ? _total : 6; // default 6 (minimum order)
+          }
           // Determine form: "Frozen" → frozen, else goreng
           const _form = /frozen/i.test(_summary) ? 'frozen' : 'goreng';
           const _name = 'Risol ' + (_form === 'frozen' ? 'Frozen' : 'Goreng') + ' — Mix ' + _pack + 'pcs';
