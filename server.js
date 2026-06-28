@@ -9551,6 +9551,34 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
         if (state === "awaiting_order_confirm" && typeof tryHandleOrderConfirm === "function" && await tryHandleOrderConfirm(from, userText)) return true;
         if (state === "awaiting_meeting_package_confirm" && typeof tryHandleMeetingPackageConfirm === "function" && await tryHandleMeetingPackageConfirm(from, userText)) return true;
         if (state === "awaiting_pin_confirm" && await tryHandlePinConfirm(from, userText)) return true;
+        // Confirm in product selection: treat as "lanjut pesan" if pending items exist
+        if ((state === "awaiting_product_selection" || state === "awaiting_usecase") && !draft.delivery_mode) {
+          const _bd = loadSbsrDraft(from) || draft;
+          const _pendItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
+          const _summary = _bd.pending_order_summary || "";
+          if (_pendItems.length > 0 || _summary) {
+            let _price = 0;
+            if (_pendItems.length > 0) {
+              _price = _pendItems.reduce((sum, it) => {
+                const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
+                if (q <= 3) return sum + (isM ? 33000 : 29000);
+                if (q <= 6) return sum + (isM ? 63000 : 55000);
+                return sum + (isM ? 120000 : 105000);
+              }, 0);
+            } else {
+              const _pm = _summary.match(/Rp\s*([\d.]+)/);
+              _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+            }
+            const _pack = _pendItems.length > 0 ? _pendItems.reduce((s,it) => s+(Number(it.qty)||1),0) : 6;
+            const _form = /frozen/i.test(_summary) ? "frozen" : "goreng";
+            const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
+            saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_items:null, pending_order_summary:null, state:"awaiting_delivery_method" });
+            log("llm-classifier", "confirm→lanjut price=" + _price + " pack=" + _pack);
+            await sendSbsrDeliveryMethodButtons(from);
+            sendReaction(from, messageId, "").catch(() => {});
+            return true;
+          }
+        }
         return false;
       }
 
