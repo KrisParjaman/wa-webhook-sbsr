@@ -8,6 +8,9 @@ const CHATS_DIR = "/docker/wa-webhook-sbsr/chats";
 const READ_STATE_PATH = "/docker/wa-webhook-sbsr/chats/.read-state.json";
 const MAX_MSGS = 500;
 
+let _pgPool = null;
+function init(pool) { _pgPool = pool; }
+
 try { fs.mkdirSync(CHATS_DIR, { recursive: true }); } catch (_) {}
 
 // ---------- storage ----------
@@ -50,10 +53,19 @@ function withLock(phone, fn) {
 }
 
 function appendMessage(phone, dir, text, name) {
+  const ts = Date.now();
+  const msgText = String(text == null ? "" : text).slice(0, 10000);
+  // Dual-write to PostgreSQL (fire-and-forget, never blocks file write)
+  if (_pgPool) {
+    _pgPool.query(
+      "INSERT INTO wa_messages (phone, dir, text, ts) VALUES ($1, $2, $3, $4)",
+      [safePhone(phone), dir, msgText, ts]
+    ).catch(e => console.error("[admin-pg] insert error:", e.message));
+  }
   return withLock(phone, () => {
     const chat = readChat(phone);
     if (name && !chat.name) chat.name = String(name).slice(0, 120);
-    chat.messages.push({ ts: Date.now(), dir, text: String(text == null ? "" : text).slice(0, 10000) });
+    chat.messages.push({ ts, dir, text: msgText });
     if (chat.messages.length > MAX_MSGS) chat.messages = chat.messages.slice(-MAX_MSGS);
     chat.updatedAt = Date.now();
     writeChatAtomic(phone, chat);
@@ -1421,4 +1433,4 @@ function mount(app, sendText, ADMIN_PASSWORD) {
 
 const express = require("express");
 
-module.exports = { logIncoming, logOutgoing, isPaused, setPaused, listChats, getChat, stats, safePhone, markChatRead, mount };
+module.exports = { logIncoming, logOutgoing, isPaused, setPaused, listChats, getChat, stats, safePhone, markChatRead, mount, init };
