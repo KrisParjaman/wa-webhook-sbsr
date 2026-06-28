@@ -3061,7 +3061,7 @@ function _initEngine() {
     try { require('./lib/handlers/handler-agent.cjs').init(agentCore); } catch (_) {}
   }
   // Init msg-processor
-  if (msgProcessor) msgProcessor.init({ sendToOpenClaw: sendToOpenClaw, sendMessage: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, secLib: secLib, admin: admin, engineCtx: engineCtx, enginePipeline: enginePipeline, sbsrLlmClassifierEnabled: sbsrLlmClassifierEnabled, ADMIN_PHONES: ADMIN_PHONES });
+  if (msgProcessor) msgProcessor.init({ sendToOpenClaw: sendToOpenClaw, sendMessage: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, secLib: secLib, admin: admin, engineCtx: engineCtx, enginePipeline: enginePipeline, sbsrLlmClassifierEnabled: sbsrLlmClassifierEnabled, ADMIN_PHONES: ADMIN_PHONES, sendReaction: sendReaction, sendTypingIndicator: sendTypingIndicator, sendSbsrDeliveryMethodButtons: sendSbsrDeliveryMethodButtons, sendSbsrAddonOffer: sendSbsrAddonOffer });
   // Init ocr-utils
   if (ocrUtils) ocrUtils.init({ log: log });
   // Init media-utils
