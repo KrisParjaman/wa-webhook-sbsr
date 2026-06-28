@@ -3314,16 +3314,10 @@ function _notifyAdminOnMessage(from, contacts) {
   }
 }
 
-async function handleMessage(msg, contacts) {
-  const from = msg.from;
-  const messageId = msg.id;
-  const contactName = contacts?.[0]?.profile?.name || from;
 
-  if (!await _guardMessage(from, messageId, msg)) return;
-  _notifyAdminOnMessage(from, contacts);
+// ── Message processor (extracted from handleMessage) ──────────────
+async function _processMessage(msg, from, messageId, contactName) {
 
-  try {
-    markAsRead(messageId).catch(() => {});
     let userText = "";
     if (msg.type === "text") {
       const _raw = msg.text.body || "";
@@ -4700,7 +4694,18 @@ function getStateNudgeText(state) {
       for (const part of parts) { if (part && part.trim()) await sendWhatsAppMessage(from, part); }
     }
     sendReaction(from, messageId, "").catch(() => {});
-    log("reply", "To " + from + ": " + aiReply.substring(0, 100) + "...");
+    log("reply", "To " + from + ": " + aiReply.substring(0, 100) + "...");}
+
+async function handleMessage(msg, contacts) {
+  const from = msg.from;
+  const messageId = msg.id;
+  const contactName = contacts?.[0]?.profile?.name || from;
+
+  if (!await _guardMessage(from, messageId, msg)) return;
+  _notifyAdminOnMessage(from, contacts);
+
+  try {
+    await _processMessage(msg, from, messageId, contactName);
   } catch (err) {
     log("error", "Processing message from " + from + ": " + err.message);
     try { await sendWhatsAppMessage(from, "Maaf, ada error. Coba lagi ya."); } catch (_) {}
