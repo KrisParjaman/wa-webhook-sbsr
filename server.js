@@ -8830,3 +8830,45 @@ function formatFaqForLLM() {
   return faq.join("\\n");
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// STUBS — deleted functions (migrated to pipeline v2 ctx handlers)
+// These stubs keep existing call sites safe. All return false/void.
+// Remove after pipeline v2 is production-verified.
+// ═══════════════════════════════════════════════════════════════════
+function tryHandleDeliveryConfirm(){return false}
+function tryHandleInvoiceOk(){return false}
+function tryHandleAdminHandoff(){return false}
+function tryHandleKitchenReady(){return false}
+function tryHandleGlobalAddMore(){return false}
+function tryHandleTextVariantSelection(){return false}
+function tryHandleCatalogRequest(){return false}
+function tryHandleMainMenuQuestionChoice(){return false}
+function tryHandleDeliveryMethodSelection(){return false}
+function tryHandleBuktiOcrFailedManualReview(){return false}
+function tryHandleBuktiAuto(){return false}
+function tryHandleWhatsAppLocation(){return false}
+function tryHandleWrongInputInLocationStates(){return false}
+function tryHandleAddressTextCapture(){return false}
+function tryHandleOngkirCheck(){return false}
+function tryHandleDestinationCheck(){return false}
+function tryHandleUrlEcho(){return false}
+function tryHandleCourierOverride(){return false}
+function tryHandleAwaitingQuestionFlow(){return false}
+function tryHandleQuestionFaq_match(){return false}
+function tryHandleAwaitingNameMultilineEarly(){return false}
+function tryHandleNameCapture(){return false}
+function tryHandleAddonReply(){return false}
+function tryHandleMeetingPackageConfirm(){return false}
+function tryHandleAddressPinConfirm(){return false}
+function tryHandleOocDuringCheckout(){return false}
+function tryHandleIgPost(){return false}
+function tryHandleIgTopicReply(){return false}
+function tryHandleSaldo(){return false}
+function tryHandlePOCreate(){return false}
+function tryHandlePOApproval(){return false}
+function tryHandleIgApproval(){return false}
+function tryHandleMissingFormInquiry(){return false}
+function tryHandleMissingFormClarification(){return false}
+function tryHandleFreeTextOrder(){return false}
+function tryHandleOrderConfirm(){return false}
+
