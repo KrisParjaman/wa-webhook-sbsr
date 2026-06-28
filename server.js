@@ -19,6 +19,8 @@ let stateManager = null;
 let mapsGeocode = null;
 let llmClassifier = null;
 let addressHandler = null;
+let mediaUtils = null;
+let ocrUtils = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -31,6 +33,8 @@ try {
   mapsGeocode = require("./lib/maps-geocode.cjs");
   llmClassifier = require("./lib/llm-classifier.cjs");
   addressHandler = require("./lib/address-handler.cjs");
+  mediaUtils = require("./lib/media-utils.cjs");
+  ocrUtils = require("./lib/ocr-utils.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -607,95 +611,13 @@ function sendToOpenClaw(phoneNumber, message) {
 if (am) am.init(sendToOpenClaw);
 
 // --- Download WhatsApp media ---
-async function downloadWhatsAppMedia(mediaId) {
-  // Step 1: Get media URL
-  const metaUrl = "https://graph.facebook.com/" + WA_API_VERSION + "/" + mediaId;
-  const mediaInfo = await new Promise((resolve, reject) => {
-    const req = https.request(metaUrl, {
-      method: "GET",
-      headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN },
-    }, (res) => {
-      let data = ""; res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
-        else reject(new Error("Media info error " + res.statusCode + ": " + data));
-      });
-    });
-    req.on("error", reject); req.end();
-  });
-
-  // Step 2: Download the actual file
-  const downloadUrl = new URL(mediaInfo.url);
-  const fileData = await new Promise((resolve, reject) => {
-    const req = https.request(downloadUrl, {
-      method: "GET",
-      headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN },
-    }, (res) => {
-      const chunks = []; res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(Buffer.concat(chunks));
-        else reject(new Error("Media download error " + res.statusCode));
-      });
-    });
-    req.on("error", reject); req.end();
-  });
-
-  return { data: fileData, mimeType: mediaInfo.mime_type || "image/jpeg" };
-}
+function downloadWhatsAppMedia() { return mediaUtils ? mediaUtils.downloadMedia.apply(null, arguments) : null; }
 
 // --- Upload image to imgbb ---
-async function uploadToImgbb(imageBuffer) {
-  const base64Image = imageBuffer.toString("base64");
-  const formData = "key=" + IMGBB_KEY + "&image=" + encodeURIComponent(base64Image);
-
-  return new Promise((resolve, reject) => {
-    const req = https.request("https://api.imgbb.com/1/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(formData) },
-    }, (res) => {
-      let data = ""; res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        try {
-          const result = JSON.parse(data);
-          if (result.data && result.data.url) resolve(result.data.url);
-          else reject(new Error("imgbb upload failed: " + data.substring(0, 200)));
-        } catch (e) { reject(new Error("imgbb parse error: " + e.message)); }
-      });
-    });
-    req.on("error", reject); req.write(formData); req.end();
-  });
-}
+function uploadToImgbb() { return mediaUtils ? mediaUtils.uploadToImgbb.apply(null, arguments) : null; }
 
 // --- Handle image message: download, upload, return URL ---
-async function handleImageMessage(msg) {
-  const mediaId = msg.image?.id;
-  if (!mediaId) return { text: "[Image received - no media ID]", url: null };
-
-  try {
-    log("image", "Downloading media " + mediaId);
-    const media = await downloadWhatsAppMedia(mediaId);
-
-    // Save locally for audit
-    if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-    const filename = "IMG-" + Date.now() + (media.mimeType.includes("png") ? ".png" : ".jpg");
-    const localPath = path.join(UPLOAD_DIR, filename);
-    fs.writeFileSync(localPath, media.data);
-    log("image", "Saved locally: " + localPath);
-
-    // Upload to imgbb
-    log("image", "Uploading to imgbb...");
-    const imgUrl = await uploadToImgbb(media.data);
-    log("image", "imgbb URL: " + imgUrl);
-
-    const caption = msg.image?.caption || "";
-    const selfHostedUrl = RECEIPT_BASE_URL + filename;
-    log("image", "Self-hosted URL: " + selfHostedUrl);
-    return { text: caption, url: selfHostedUrl, localPath: localPath, imgbbUrl: imgUrl };
-  } catch (err) {
-    log("image", "Failed to process image: " + err.message);
-    return { text: msg.image?.caption || "", url: null, error: err.message };
-  }
-}
+function handleImageMessage() { return mediaUtils ? mediaUtils.handleImage.apply(null, arguments) : null; }
 
 // --- Raw body (global parser, 1 MB limit) ---
 // Admin upload routes (/admin-send-image, /admin-send-document) are excluded here
@@ -1396,81 +1318,11 @@ function rupiah(n) {
 // Receipt OCR Pre-Processor — runs read-receipt.js on incoming images
 // BEFORE handing to LLM, so bot sees structured OCR data and can't hallucinate "link keblok"
 // =====================================================
-function runReceiptOCROnce(imageUrl) {
-  return new Promise((resolve) => {
-    const { spawn } = require('child_process');
-    let stdout = '';
-    let stderr = '';
-    // Source ig-env.sh before invoking so OPENROUTER_API_KEY (the working key) is exported
-    // — the hardcoded key inside read-receipt.js is exhausted; env override fixes it.
-    const c = spawn('docker', ['exec', OPENCLAW_EXEC_CONTAINER,
-      'bash', '-c',
-      'set -a; . /data/.openclaw/ig-env.sh; node /data/airoklin-pdf/scripts/read-receipt.js ' + JSON.stringify(imageUrl)],
-      { timeout: 45000 });
-    c.stdout.on('data', d => { stdout += d.toString(); });
-    c.stderr.on('data', d => { stderr += d.toString(); });
-    c.on('close', (code) => {
-      const trimmed = stdout.trim();
-      let jsonStr = trimmed;
-      const firstBrace = trimmed.indexOf('{');
-      const lastBrace = trimmed.lastIndexOf('}');
-      if (firstBrace >= 0 && lastBrace > firstBrace) jsonStr = trimmed.slice(firstBrace, lastBrace + 1);
-      try {
-        const parsed = JSON.parse(jsonStr);
-        // Treat as failure if every field is null (Gemini probably couldn't fetch the URL)
-        const allNull = parsed && parsed.merchant == null && parsed.total == null && parsed.date == null
-                        && (!parsed.items || parsed.items.length === 0);
-        resolve({ ok: !allNull, data: parsed, code, stdout: trimmed.slice(0,200), stderr: stderr.slice(0,200) });
-      } catch (e) {
-        resolve({ ok: false, data: null, code, stdout: trimmed.slice(0,200), stderr: stderr.slice(0,200), parseErr: e.message });
-      }
-    });
-    c.on('error', (err) => {
-      resolve({ ok: false, data: null, error: err.message });
-    });
-  });
-}
+function runReceiptOCROnce(){return ocrUtils?ocrUtils.runOnce.apply(null,arguments):null}
 
-async function runReceiptOCR(imageUrl, altImageUrl) {
-  const targets = [imageUrl, altImageUrl].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
-  for (let idx = 0; idx < targets.length; idx++) {
-    const target = targets[idx];
-    if (idx > 0) log('ocr-bridge', 'fallback target=' + target);
-    let r = await runReceiptOCROnce(target);
-    if (r.ok) return r.data;
-    log('ocr-bridge', 'first try failed (' + (r.parseErr || r.error || 'all-null/code=' + r.code) + '), retrying in 2s...');
-    await new Promise(res => setTimeout(res, 2000));
-    r = await runReceiptOCROnce(target);
-    if (r.ok) {
-      log('ocr-bridge', 'retry succeeded');
-      return r.data;
-    }
-    log('ocr-bridge', 'retry also failed: code=' + r.code + ' stderr=' + (r.stderr || '') + ' stdoutHead=' + (r.stdout || ''));
-  }
-  return null;
-}
+function runReceiptOCR(){return ocrUtils?ocrUtils.runOCR.apply(null,arguments):null}
 
-function formatOCRForBot(ocr) {
-  if (!ocr) return '';
-  const fmt = (v) => (v == null || v === '' ? '?' : String(v));
-  const rupiah = (n) => (n == null ? '?' : 'Rp ' + Number(n).toLocaleString('id-ID'));
-  const lines = [];
-  lines.push('--- OCR RESULT (from read-receipt.js) ---');
-  if (ocr.merchant) lines.push('Merchant/Bank: ' + fmt(ocr.merchant));
-  if (ocr.date) lines.push('Tanggal: ' + fmt(ocr.date));
-  if (ocr.total != null) lines.push('Total: ' + rupiah(ocr.total));
-  if (ocr.berita) lines.push('Berita/Keterangan: ' + fmt(ocr.berita));
-  if (ocr.recipient_name) lines.push('Penerima: ' + fmt(ocr.recipient_name));
-  if (ocr.sender_name) lines.push('Pengirim: ' + fmt(ocr.sender_name));
-  if (Array.isArray(ocr.items) && ocr.items.length) {
-    lines.push('Items:');
-    ocr.items.slice(0, 8).forEach(it => {
-      lines.push('  - ' + fmt(it.name) + ' x' + fmt(it.qty) + ' @ ' + rupiah(it.price));
-    });
-  }
-  lines.push('--- END OCR ---');
-  return lines.join('\n');
-}
+function formatOCRForBot(){return ocrUtils?ocrUtils.formatForBot.apply(null,arguments):null}
 
 // =====================================================
 // IG Topic Reply Pre-Handler — if the user previously clicked "Post di Instagram" from the menu
@@ -3236,6 +3088,10 @@ function _initEngine() {
     getAvailability: function() { return catalogAvailability; },
     log: log,
   });
+  // Init ocr-utils
+  if (ocrUtils) ocrUtils.init({ log: log });
+  // Init media-utils
+  if (mediaUtils) mediaUtils.init({ log: log, waApiVersion: WA_API_VERSION, waAccessToken: WA_ACCESS_TOKEN, imgbbKey: IMGBB_KEY });
   // Init address-handler
   if (addressHandler) addressHandler.init({ sendToOpenClaw: sendToOpenClaw, sendMessage: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft });
   // Init llm-classifier
