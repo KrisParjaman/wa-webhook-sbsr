@@ -6279,8 +6279,21 @@ async function tryHandleAddressTextCapture(from, userText) {
   }
 
   if (isSbsrCheckoutCollectionActive(latestDraft)) {
-    const missingMsg = getSbsrDeterministicMissingStateMessage(from, latestDraft);
-    try { await sendSbsrLocationPromptMessage(from, latestDraft, missingMsg); } catch (e) { log("sbsr-addr-text", "missing-piece send err: " + e.message); }
+    if (!hasDest) {
+      // Address text captured but no pin yet — always send location button regardless of state.
+      // sendSbsrLocationPromptMessage gates on WRONG_INPUT_LOCATION_STATES so it would fall
+      // through to plain text if state is e.g. awaiting_delivery_method. Bypass it here.
+      log("sbsr-addr-text", "no pin yet, sending location request button");
+      try {
+        await sendWhatsAppLocationRequest(from,
+          "Makasih Kak, alamatnya sudah Mintu catat 🤍\n\n" +
+          "Boleh tap tombol *Send Location* di bawah untuk share titik pin lokasi / Google Maps yang sesuai alamat pengirimannya, biar Mintu bisa cek ongkirnya 😊"
+        );
+      } catch (e) { log("sbsr-addr-text", "location-btn send err: " + e.message); }
+    } else {
+      const missingMsg = getSbsrDeterministicMissingStateMessage(from, latestDraft);
+      try { await sendSbsrLocationPromptMessage(from, latestDraft, missingMsg); } catch (e) { log("sbsr-addr-text", "missing-piece send err: " + e.message); }
+    }
     return true;
   }
 
