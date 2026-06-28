@@ -21,6 +21,7 @@ let llmClassifier = null;
 let addressHandler = null;
 let mediaUtils = null;
 let ocrUtils = null;
+let textUtils = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -35,6 +36,7 @@ try {
   addressHandler = require("./lib/address-handler.cjs");
   mediaUtils = require("./lib/media-utils.cjs");
   ocrUtils = require("./lib/ocr-utils.cjs");
+  textUtils = require("./lib/text-utils.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -1540,28 +1542,7 @@ function tryHandlePinConfirm() { return false; }
 // not opaque shortlink hash), (c) NO address token appears in URL slug.
 // On uncertainty (shortlink, missing words), returns false — silence is
 // safer than false-positive accusations.
-function looksLikeAddressPinMismatch(addressText, url) {
-  if (!addressText || addressText.startsWith("(")) return false;
-  if (!url || typeof url !== "string") return false;
-  const STOP = ["jalan", "kelurahan", "kecamatan", "kabupaten", "kota", "desa", "indonesia"];
-  const addrTokens = String(addressText)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(w => w.length >= 4 && !STOP.includes(w));
-  if (addrTokens.length === 0) return false;
-  let urlPlace;
-  try {
-    const u = new URL(url);
-    urlPlace = decodeURIComponent((u.pathname || "") + " " + (u.search || ""))
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ");
-  } catch { return false; }
-  const urlPlaceWords = urlPlace.split(/\s+/).filter(w => w.length >= 4 && /^[a-z]+$/.test(w));
-  if (urlPlaceWords.length === 0) return false;
-  const overlap = addrTokens.some(tok => urlPlaceWords.includes(tok));
-  return !overlap;
-}
+function looksLikeAddressPinMismatch(){return textUtils?textUtils.looksLikeAddressPinMismatch.apply(null,arguments):null}
 
 function haversineKm() { return mapsGeocode ? mapsGeocode.haversineKm.apply(null, arguments) : null; }
 
@@ -1778,31 +1759,7 @@ function sbsrRouterLogSkipped(rail) {
 }
 
 
-function isNameTokens(t, opts) {
-  // t is already trimmed; check it's a plausible 1-4 word personal name
-  const viaPrefix = !!(opts && opts.viaPrefix);
-  if (t.length < 2 || t.length > 40) return false;
-  if (!/^\p{L}[\p{L} .'-]*$/u.test(t)) return false;
-  const words = t.split(/\s+/);
-  if (words.length < 1 || words.length > 4) return false;
-  // Hard-no: any product/intent word in the candidate disqualifies it as a name
-  for (const w of words) {
-    if (NAME_HARD_NO.has(w.toLowerCase())) return false;
-  }
-  // Blocklist: reject only if ALL words are stopwords (so "Tania Test" passes,
-  // "ok bener" / "halo kak" don't). Single-word stopword like "ok" still rejected.
-  let allBlocked = true;
-  for (const w of words) {
-    if (!NAME_CAPTURE_BLOCKLIST.has(w.toLowerCase())) { allBlocked = false; break; }
-  }
-  if (allBlocked) return false;
-  // Standalone names (not via prefix) must have at least one capitalized word —
-  // proper-noun signal that distinguishes "Tania" / "Tania Test" from colloquial
-  // chat like "nanya mulu" / "tau ah" / "udah deh". Prefix path ("Saya tania")
-  // skips this since context already implies a name.
-  if (!viaPrefix && !/\b\p{Lu}/u.test(t)) return false;
-  return true;
-}
+function isNameTokens(){return textUtils?textUtils.isNameTokens.apply(null,arguments):null}
 // Try to extract a customer name from free text. Handles:
 //   - "Saya Tania" / "Aku Budi" / "Nama Siti" / "Nama saya Andi" / "Atas nama Joko"
 //   - Multi-line: first line might be a prefixed/standalone name, rest is address
@@ -1812,57 +1769,8 @@ function isNameTokens(t, opts) {
 // draft.customer_name is missing but the customer typed it earlier (e.g. before
 // the name-capture intercept was deployed, or in a multi-line msg the bridge
 // missed). Reads /docker/wa-webhook-sbsr/chats/<phone>.json (admin.js storage).
-function findNameInChatHistory(fromRaw, lookback = 12) {
-  try {
-    const phone = String(fromRaw || "").replace(/[^0-9]/g, "");
-    if (!phone) return null;
-    const f = "/docker/wa-webhook-sbsr/chats/" + phone + ".json";
-    if (!fs.existsSync(f)) return null;
-    const chat = JSON.parse(fs.readFileSync(f, "utf8"));
-    if (!Array.isArray(chat.messages)) return null;
-    const inbound = chat.messages.filter(m => m && m.dir === "in" && typeof m.text === "string");
-    const recent = inbound.slice(-lookback).reverse(); // newest first
-    for (const m of recent) {
-      // Skip ALL bridge-synthetic messages (CATALOG / CART / MENU / etc.) - they
-      // contain phrases like "tanya nama dan alamat pengiriman" that would feed
-      // false-positive captures via the "nama" prefix path.
-      if (isSyntheticMsg(m.text)) continue;
-      const found = extractCustomerName(m.text);
-      if (found) return found;
-    }
-    return null;
-  } catch (e) {
-    log("sbsr-name-history-scan", "err: " + e.message);
-    return null;
-  }
-}
-function extractCustomerName(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-
-  // Prefix patterns — case-insensitive, name capture is non-greedy up to newline/comma.
-  // Allow leading filler ("halo kak, ", "iya ") before the prefix word.
-  const prefixPatterns = [
-    /(?:^|[\s,;:])(?:nama\s+saya|atas\s+nama|nama\s*[:\-]\s*saya|nama\s*[:\-])\s*([\p{L}][\p{L} .'-]{1,39})/iu,
-    /(?:^|[\s,;:])(?:saya|aku)\s+([\p{L}][\p{L} .'-]{1,39})/iu,
-  ];
-  for (const re of prefixPatterns) {
-    const m = raw.match(re);
-    if (m) {
-      const candidate = m[1].trim().split(/[,\n]/)[0].trim().replace(/\s+/g, " ");
-      if (isNameTokens(candidate, { viaPrefix: true })) return candidate;
-    }
-  }
-
-  // Multi-line: first line might be a standalone name (capitalization required)
-  const firstLine = raw.split(/\n/)[0].trim();
-  if (firstLine && firstLine !== raw && isNameTokens(firstLine)) return firstLine;
-
-  // Whole text is a short standalone name (capitalization required)
-  if (isNameTokens(raw)) return raw;
-
-  return null;
-}
+function findNameInChatHistory(){return textUtils?textUtils.findNameInChatHistory.apply(null,arguments):null}
+function extractCustomerName(){return textUtils?textUtils.extractCustomerName.apply(null,arguments):null}
 
 
 // =====================================================
@@ -2127,27 +2035,7 @@ const ONGKIR_QUESTION_HINT_RE = /\b(berapa|brp|cek|gimana|gmn|brapa)\b|\?\s*$/i;
 // msg (contains street keywords or numbers + meaningful length, not a name,
 // not a URL). Used as fallback in tryHandleAddressAndQuote.addressText computation.
 const ADDR_KEYWORD_RE = /\b(jl|jln|jalan|blok|rt|rw|kel|kelurahan|kec|kecamatan|kota|kabupaten|kab|desa|dukuh|gang|gg|gedung|komplek|kompleks|perumahan|cluster|villa|apt|apartemen|tower|lt|lantai|ruko|gedung|graha)\b/i;
-function looksLikeAddress(text) {
-  const t = String(text || "").trim();
-  if (t.length < 10 || t.length > 300) return false;
-  // Questions are not addresses
-  if (t.includes("?")) return false;
-  if (/^(?:apa|siapa|kenapa|bagaimana|berapa|kapan|dimana|bisa|apakah|mau\s+tanya|tanya\s+dulu|info|ada\s+apa|permisi|maaf)\b/i.test(t)) return false;
-  if (/\b(?:tanya|menu\s+apa|isi\w*\s+apa|rekomendasi|recommend|halal|tahan\s+berapa|minimal|min\s+order)\b/i.test(t)) return false;
-  if (MAPS_URL_RE.test(t)) return false;
-  if (/^\+?\d{6,}$/.test(t.replace(/\s+/g, ""))) return false; // phone-like
-  // Skip synthetic bridge→LLM messages ([CATALOG ORDER], [CART], [MENU], etc.)
-  if (/^\s*\[(?:CATALOG|CART|MENU|ORDER|PROOF|INVOICE)/i.test(t)) return false;
-  // Skip messages that look like cart/menu restatements ("Risol Goreng X", "Smoked Beef Y")
-  if (/\bRisol\s+(?:Goreng|Frozen|Ragout|Ayam|Smoked|Mix|Mayo)/i.test(t)) return false;
-  // Skip addon intent messages ("tambah 2 chili sauce", "tambah thermal bag", etc.)
-  if (/^(?:tambah|tambahin|add|plus|extra)\b.*?(?:chili|sauce|thermal|pouch|ice.?gel|sambal)/i.test(t)) return false;
-  // Strong signal: has explicit address keyword (jl/blok/rt/kel/etc.)
-  if (ADDR_KEYWORD_RE.test(t)) return true;
-  // Weaker signal: has digit AND is long enough to be more than a qty/SKU restatement
-  if (/\d/.test(t) && t.length >= 20) return true;
-  return false;
-}
+function looksLikeAddress(){return textUtils?textUtils.looksLikeAddress.apply(null,arguments):null}
 
 // ============================================================
 // Wrong-input detection for location-requiring checkout states
