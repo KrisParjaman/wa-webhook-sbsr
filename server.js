@@ -340,138 +340,19 @@ function pickNonEmpty(...vals) {
   return "";
 }
 
-function deriveSegmentFromUseCase(useCase) {
-  const u = String(useCase || "").toLowerCase().trim();
-  if (!u) return "";
-  if (u.includes("makan") || u.includes("eat_now")) return "Eat Now";
-  if (u.includes("stock") || u.includes("frozen-rumah")) return "Stock Frozen";
-  if (u.includes("meeting") || u.includes("acara")) return "Meeting/Event";
-  if (u.includes("gift") || u.includes("hampers")) return "Gift/Hampers";
-  return "";
-}
+function deriveSegmentFromUseCase() { return gsheetSync ? gsheetSync.deriveSegment.apply(null, arguments) : null; }
 
-function derivePreferredProduct(draft) {
-  const items = Array.isArray(draft?.items) ? draft.items : [];
-  let frozen = 0;
-  let goreng = 0;
-  for (const it of items) {
-    const qty = Number(it?.qty || 1);
-    const form = String(it?.form || "").toLowerCase();
-    if (form === "frozen") frozen += qty;
-    else if (form === "goreng") goreng += qty;
-  }
-  if (frozen > 0 && goreng === 0) return "Frozen";
-  if (goreng > 0 && frozen === 0) return "Goreng";
-  if (frozen > goreng) return "Frozen";
-  if (goreng > frozen) return "Goreng";
-  if (frozen > 0 || goreng > 0) return "Mix";
-  return "";
-}
+function derivePreferredProduct() { return gsheetSync ? gsheetSync.derivePreferredProduct.apply(null, arguments) : null; }
 
-function appendNoteSafe(existingNotes, newNote, maxChars = 900) {
-  const base = String(existingNotes || "").trim();
-  const next = String(newNote || "").trim();
-  if (!next) return base;
-  if (!base) return next.slice(0, maxChars);
-  if (base.includes(next)) return base.slice(0, maxChars);
-  return `${base} | ${next}`.slice(0, maxChars);
-}
+function appendNoteSafe() { return gsheetSync ? gsheetSync.appendNote.apply(null, arguments) : null; }
 
-function calcOrderQty(items) {
-  return (Array.isArray(items) ? items : []).reduce((s, it) => {
-    const qty = Number(it?.qty || 0);
-    const pack = Number(it?.pack_size || 1);
-    return s + qty * pack;
-  }, 0);
-}
+function calcOrderQty() { return gsheetSync ? gsheetSync.calcOrderQty.apply(null, arguments) : null; }
 
-function monthKeyYmd(ymd) {
-  const m = String(ymd || "").match(/^(\d{4})-(\d{2})-/);
-  return m ? `${m[1]}-${m[2]}` : "";
-}
+function monthKeyYmd() { return gsheetSync ? gsheetSync.monthKey.apply(null, arguments) : null; }
 
-function computeCustomerMetrics({ eventType, draft, existingCustomer }) {
-  const ex = existingCustomer || {};
-  const exQty = toNum(ex["Total quantity _Order_Closing"]);
-  const exOmzet = toNum(ex["Total_Omzet"]);
-  const exAov = toNum(ex["Average_Order (AOV)"]);
-  const exOmzetMonth = toNum(ex["Omzet_Bulan_Ini"]);
-  const nowYmd = fmtYmd(nowJakartaDate());
-  const nowMonth = monthKeyYmd(nowYmd);
-  const orderQty = calcOrderQty(draft?.items || []);
-  const orderOmzet = toNum(draft?.grand_total || (toNum(draft?.subtotal) + toNum(draft?.ongkir)));
-  const exLastOrder = String(ex["Last_Order"] || "");
-  let totalQtyClosing = exQty;
-  let totalOmzet = exOmzet;
-  let omzetBulanIni = exOmzetMonth;
-  let lastOrder = exLastOrder;
+function computeCustomerMetrics() { return gsheetSync ? gsheetSync.computeMetrics.apply(null, arguments) : null; }
 
-  if (eventType === "payment_approved") {
-    totalQtyClosing = exQty + orderQty;
-    totalOmzet = exOmzet + orderOmzet;
-    lastOrder = nowYmd;
-    const exMonth = monthKeyYmd(exLastOrder);
-    if (exMonth === nowMonth) omzetBulanIni = exOmzetMonth + orderOmzet;
-    else omzetBulanIni = orderOmzet;
-  }
-
-  let closedCount = 0;
-  if (exAov > 0 && exOmzet > 0) closedCount = Math.max(1, Math.round(exOmzet / exAov));
-  if (eventType === "payment_approved") closedCount += 1;
-  const aov = closedCount > 0 ? Math.round(totalOmzet / closedCount) : exAov;
-
-  let hari = ex["Hari_Sejak_Last_Order"] || "";
-  if (lastOrder) {
-    const t0 = new Date(`${lastOrder}T00:00:00+07:00`).getTime();
-    const t1 = new Date(`${nowYmd}T00:00:00+07:00`).getTime();
-    if (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) {
-      hari = Math.floor((t1 - t0) / 86400000);
-    }
-  }
-
-  return {
-    totalQtyClosing,
-    totalOmzet,
-    aov,
-    omzetBulanIni,
-    lastOrder,
-    firstOrderCandidate: nowYmd,
-    hariSejakLastOrder: hari,
-  };
-}
-
-function buildCustomerDbRowFromDraft(draft, event, existingCustomer) {
-  const ex = existingCustomer || {};
-  const ev = event || {};
-  const metrics = computeCustomerMetrics({ eventType: ev.type, draft, existingCustomer: ex });
-  const nowStr = new Date().toISOString();
-  const note = `${nowStr} ${ev.type || "event"}${draft?.grand_total ? ` total=${draft.grand_total}` : ""}`;
-  return {
-    "No_WA": normalizePhone08(draft?.phone || ev.phone || ex["No_WA"] || ""),
-    "Nama": pickNonEmpty(draft?.customer_name, ex["Nama"], ""),
-    "Alamat": pickNonEmpty(draft?.address_text, draft?.destination?.address_text, ex["Alamat"], ""),
-    "Segment_CRM_Auto": pickNonEmpty(deriveSegmentFromUseCase(draft?.use_case), ex["Segment_CRM_Auto"], ""),
-    "First_Order": ex["First_Order"] || metrics.firstOrderCandidate || "",
-    "Last_Order": metrics.lastOrder || ex["Last_Order"] || "",
-    "Total quantity _Order_Closing": metrics.totalQtyClosing,
-    "Total_Omzet": metrics.totalOmzet,
-    "Average_Order (AOV)": metrics.aov,
-    "Omzet_Bulan_Ini": metrics.omzetBulanIni,
-    "Hari_Sejak_Last_Order": metrics.hariSejakLastOrder,
-    "Opt_In_WA": ex["Opt_In_WA"] || "TRUE",
-    "Saved_Contact": ex["Saved_Contact"] || (draft?.customer_name ? "Yes" : ""),
-    "Preferred_Channel": "WhatsApp",
-    "Preferred_Product": pickNonEmpty(derivePreferredProduct(draft), ex["Preferred_Product"], ""),
-    "Last_Aftersales_Status": ex["Last_Aftersales_Status"] || "",
-    "Last_Broadcast_Date": ex["Last_Broadcast_Date"] || "",
-    "Last_Broadcast_Program": ex["Last_Broadcast_Program"] || "",
-    "Last_Response": pickNonEmpty(ev.lastResponse, ex["Last_Response"], ""),
-    "Last_Offer": pickNonEmpty(ev.lastOffer, ex["Last_Offer"], ""),
-    "Next_Broadcast_Date": ex["Next_Broadcast_Date"] || "",
-    "Priority_Level": ex["Priority_Level"] || "WARM",
-    "Notes": appendNoteSafe(ex["Notes"] || "", note),
-  };
-}
+function buildCustomerDbRowFromDraft() { return gsheetSync ? gsheetSync.buildRow.apply(null, arguments) : null; }
 
 async function runSentuhGsheet(args = [], stdinObj = null, timeoutMs = 5000) {
   return new Promise((resolve) => {
@@ -1667,30 +1548,13 @@ const SBSR_CHECKOUT_LOCK_STATES = new Set([
 ]);
 const SBSR_CHECKOUT_ENGLISH_GUARD_RE = /(Thanks,|Give me just a moment|Okay, final details|Sudah termasuk pajak|NO_REPLY|bridge will handle|awaiting the image|payment confirmation|interactive WhatsApp catalog|waiting for customer)/i;
 
-function sbsrDraftHasDestination(draft) { return draftStore ? draftStore.hasDestination(draft) : false; }
-function isSbsrCheckoutCollectionActive(draft) { return draftStore ? draftStore.isCheckoutActive(draft) : false; }
+function sbsrDraftHasDestination() { return draftStore ? draftStore.hasDestination.apply(null, arguments) : null; }
+function isSbsrCheckoutCollectionActive() { return draftStore ? draftStore.isCheckoutActive.apply(null, arguments) : null; }
 
 
 // === OOC HANDLER V3: handle out-of-context questions during checkout ===
 
-function getSbsrDeterministicMissingStateMessage(from, draft) {
-  const st = String(draft?.state || "").trim().toLowerCase();
-  if (st === "awaiting_delivery_method") return buildSbsrDeliveryMethodPromptText();
-  if (st === "awaiting_address_pin_confirm") return "Balas 1 (alamat), 2 (pin Maps), atau 3 (kirim ulang) ya Kak 🤍";
-  if (st === "awaiting_location_retry") return "Kak, boleh coba kirim ulang link Google Maps, Share Location WhatsApp, atau screenshot titik lokasi ya 🤍";
-  const customerName = draft.customer_name || (typeof findNameInChatHistory === "function" ? findNameInChatHistory(from) : null);
-  if (!customerName) {
-    return "Boleh info atas nama siapa Kak? Biar Mintu lanjut cek ongkirnya 🤍";
-  }
-  if (!sbsrDraftHasDestination(draft) && !(draft.gmaps_link || (draft.destination && draft.destination.gmaps_link))) {
-    return "Boleh kirim lokasi pakai fitur Share Location WhatsApp ya Kak 🤍";
-  }
-  const addressText = (draft.pending_address_text || (draft.destination && draft.destination.address_text) || "").trim();
-  if (!addressText || addressText.startsWith("(alamat dari pin)")) {
-    return "Boleh kirim alamat lengkap pengiriman ya Kak 🤍";
-  }
-  return "Sebentar ya Kak, Mintu lagi lanjut cek ongkir dulu 🤍";
-}
+function getSbsrDeterministicMissingStateMessage() { return null; }
 
 // Proactive location prompt: when draft state is in a location-requiring state,
 // send via WhatsApp interactive Location Request Message (with "Send Location"
@@ -1781,78 +1645,7 @@ function parseScriptJSON() { return mapsGeocode ? mapsGeocode.parseScriptJSON.ap
 // Conditions: confidence=low + typed_geocode_failed + same_kecamatan + SBSR_ENABLE_LLM_ADDRESS_MATCH=true
 // Existing validator remains source of truth. Fail-open: any error -> null -> existing behavior.
 // =====================================================
-async function maybeSemanticAddressMatch({ addressText, mapsAddress, typedGeo, sameKecamatan, distKm }) {
-  if (process.env.SBSR_ENABLE_LLM_ADDRESS_MATCH !== "true") return null;
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) { log("sbsr-address-llm", "no_api_key_skip"); return null; }
-  const addr = String(addressText || "").trim();
-  const maps = String(mapsAddress || "").trim();
-  if (!addr || !maps) return null;
-  log("sbsr-address-llm", "evaluating");
-  const systemPrompt = [
-    "Kamu adalah validator alamat pengiriman.",
-    "Tugasmu HANYA mengevaluasi apakah dua alamat kemungkinan besar merujuk ke area yang sama di dunia nyata.",
-    "Aturan:",
-    "- Nama jalan mirip + kecamatan sama = kemungkinan match, meski nomor rumah berbeda",
-    "- Fokus pada nama jalan dan kecamatan, bukan nomor rumah",
-    "- Nomor rumah berbeda di jalan yang sama = masih bisa match",
-    "- Jangan halusinasi atau mengarang informasi",
-    "- Jika ragu, jawab semantic_match: false",
-    "- Jawab hanya JSON tanpa markdown",
-  ].join("\n");
-  const distLine = distKm !== null ? ("Estimasi jarak: " + distKm.toFixed(1) + " km") : "Jarak: tidak bisa dihitung";
-  const userMsg = [
-    "Evaluasi apakah dua alamat ini kemungkinan masih area yang sama:",
-    "",
-    "Alamat diketik customer: \"" + addr + "\"",
-    "Alamat dari Maps pin: \"" + maps + "\"",
-    "Geocode typed address: " + (typedGeo ? "berhasil" : "gagal (fallback kecamatan)"),
-    "Kecamatan sama: " + (sameKecamatan ? "ya" : "tidak"),
-    distLine,
-    "",
-    "Jawab HANYA dengan JSON (tanpa markdown): {\"semantic_match\": true|false, \"confidence\": \"low|medium|high\", \"reason\": \"alasan singkat Bahasa Indonesia\"}",
-  ].join("\n");
-  try {
-    const body = JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMsg },
-      ],
-      max_tokens: 150,
-      temperature: 0.1,
-    });
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + apiKey,
-        "HTTP-Referer": "https://biks.ai",
-        "X-Title": "SBSR Address Validator",
-      },
-      body,
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) { log("sbsr-address-llm", "api_error status=" + res.status); return null; }
-    const data = await res.json();
-    const raw = String((data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "").trim();
-    const cleaned = raw.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
-    let result;
-    try { result = JSON.parse(cleaned); }
-    catch (_e) { log("sbsr-address-llm", "parse_err raw=" + raw.slice(0, 120)); return null; }
-    const match = result.semantic_match === true;
-    const confidence = String(result.confidence || "low").toLowerCase();
-    const reason = String(result.reason || "").slice(0, 200);
-    log("sbsr-address-llm", "semantic_match=" + String(match));
-    log("sbsr-address-llm", "confidence=" + confidence);
-    log("sbsr-address-llm", "reason=" + reason);
-    return { semantic_match: match, confidence: confidence, reason: reason };
-  } catch (e) {
-    log("sbsr-address-llm", "error=" + e.message);
-    log("sbsr-address-llm", "fallback_existing_validator");
-    return null;
-  }
-}
+function maybeSemanticAddressMatch() { return null; }
 
 // =====================================================
 // Semantic Address Match — general-purpose LLM validator for Indonesian addresses.
@@ -1860,92 +1653,7 @@ async function maybeSemanticAddressMatch({ addressText, mapsAddress, typedGeo, s
 // Returns: { match: bool, confidence: "high"|"medium"|"low", reason: string } or null
 // Fail-open: any error → null → caller uses existing deterministic result.
 // =====================================================
-async function semanticAddressMatch({ typedAddress, resolvedMapsAddress }) {
-  if (process.env.SBSR_ENABLE_LLM_ADDRESS_MATCH !== "true") return null;
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) { log("sbsr-address-semantic", "no_api_key"); return null; }
-  const addr = String(typedAddress || "").trim();
-  const maps = String(resolvedMapsAddress || "").trim();
-  if (!addr || !maps) return null;
-  const systemPrompt = [
-    "Kamu adalah semantic validator alamat Indonesia.",
-    "Tugas: menentukan apakah alamat customer dan alamat Google Maps kemungkinan lokasi yang sama.",
-    "Rules:",
-    "- fokus pada nama jalan",
-    "- fokus pada kelurahan",
-    "- fokus pada kecamatan",
-    "- toleransi typo",
-    "- toleransi RT/RW hilang atau berbeda",
-    "- toleransi format berbeda",
-    "- toleransi nomor rumah beda kecil (satu digit)",
-    "- jangan terlalu strict",
-    "- jika kemungkinan besar area sama → match=true",
-    "- jika ragu → match=false",
-    "- jawab hanya JSON tanpa markdown",
-  ].join("\n");
-  const userMsg = [
-    "Tentukan apakah dua alamat ini kemungkinan besar lokasi yang sama:",
-    "",
-    "Alamat customer: \"" + addr + "\"",
-    "Alamat Google Maps: \"" + maps + "\"",
-    "",
-    "Jawab HANYA JSON: {\"match\": true|false, \"confidence\": \"high|medium|low\", \"reason\": \"alasan singkat\"}",
-  ].join("\n");
-  try {
-    const body = JSON.stringify({
-      model: "google/gemini-2.5-flash-preview-06-25",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMsg },
-      ],
-      max_tokens: 120,
-      temperature: 0.1,
-    });
-    let res = null;
-    for (let _r = 0; _r < 3; _r++) {
-      if (_r > 0) { log("sbsr-address-semantic", "retry_" + _r); await new Promise(r => setTimeout(r, 1000 * _r)); }
-      const _ctrl = new AbortController();
-      const _tm = setTimeout(() => _ctrl.abort(), 15000);
-      try {
-        res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + apiKey,
-            "HTTP-Referer": "https://biks.ai",
-            "X-Title": "SBSR Semantic Address Validator",
-          },
-          body,
-          signal: _ctrl.signal,
-        });
-        clearTimeout(_tm);
-        if (res.ok) break;
-        log("sbsr-address-semantic", "api_error=" + res.status);
-        if (res.status !== 429 && res.status < 500) { res = null; break; }
-        res = null;
-      } catch (_e) {
-        clearTimeout(_tm);
-        log("sbsr-address-semantic", "retry_err=" + _e.message);
-        res = null;
-      }
-    }
-    if (!res) { log("sbsr-address-semantic", "gave_up"); return null; }
-    const data = await res.json();
-    const raw = String((data?.choices?.[0]?.message?.content) || "").trim();
-    const cleaned = raw.replace(/^```(?:json)?[\r\n]*/i, "").replace(/[\r\n]*```$/i, "").trim();
-    let result;
-    try { result = JSON.parse(cleaned); }
-    catch (_e) { log("sbsr-address-semantic", "parse_err raw=" + raw.slice(0, 100)); return null; }
-    return {
-      match: result.match === true,
-      confidence: String(result.confidence || "low").toLowerCase(),
-      reason: String(result.reason || "").slice(0, 200),
-    };
-  } catch (e) {
-    log("sbsr-address-semantic", "error=" + e.message);
-    return null;
-  }
-}
+function semanticAddressMatch() { return null; }
 
 async function tryHandleAddressAndQuote(from, userText) {
   if (!userText) return false;
@@ -2608,64 +2316,7 @@ async function tryHandleAddressAndQuote(from, userText) {
   return true;
 }
 
-async function tryHandleBareMapsUrl(from, userText) {
-  if (!userText) return false;
-  const m = userText.match(MAPS_URL_RE);
-  if (!m) return false;
-  const stripped = userText.replace(MAPS_URL_RE, "").trim();
-  const words = stripped.split(/\s+/).filter(w => w.replace(/[^a-zA-Z0-9]/g, "").length > 0);
-  if (words.length > 3) return false;            // mixed message — let LLM handle full address
-  if (ADMIN_PHONES.includes(from)) return false; // admins don't get cart prompts
-  const draft = loadSbsrDraft(from);
-  if (draft && Array.isArray(draft.items) && draft.items.length > 0) return false; // cart already built
-  const url = m[1];
-  const coords = await resolveGmapsUrl_BridgeSafe(url).catch(() => null);
-  if (!coords) {
-    log("sbsr-maps-bare-intercept", "from=" + from + " url did not resolve");
-    try {
-      await sendWhatsAppMessage(from,
-        "Kak, link Maps-nya belum kebaca sistem. Boleh kirim ulang pin dari Google Maps atau pakai fitur Share Location WhatsApp ya 🤍"
-      );
-    } catch (e) { log("sbsr-maps-bare-intercept", "share-location prompt err: " + e.message); return false; }
-    setPendingBridgeContext(from, [
-      "Bridge gagal resolve Google Maps link tanpa cart.",
-      "JANGAN masuk LLM dan JANGAN minta Maps URL lagi.",
-      "Instruksi: minta customer kirim Share Location native WhatsApp.",
-    ].join("\n"));
-    return true;
-  }
-  try {
-    log("sbsr-location", "source=" + (/maps\.app\.goo\.gl/i.test(url) ? "maps_app" : "gmaps_link"));
-    saveSbsrDraft(from, {
-      ...(draft || { phone: from }),
-      gmaps_link: url,
-      gmaps_link_seen_at: new Date().toISOString(),
-      destination: {
-        ...((draft && draft.destination) || {}),
-        gmaps_link: url,
-        lat: coords.lat,
-        lng: coords.lng,
-        source: /maps\.app\.goo\.gl/i.test(url) ? "maps_app" : "gmaps_link",
-      },
-    });
-  } catch (e) { log("sbsr-maps-bare-intercept", "draft save err: " + e.message); }
-  const reply = "\ud83d\udccd Lokasi tersimpan ya Kak, Mintu sudah tangkap titik pin-nya \ud83e\udd0d\n\nSekarang boleh sebut menunya:\n\u2022 Varian: *RA* (Rougut), *RR* (Rendang), *RM* (Mushroom), atau *MIX*\n\u2022 Bentuk: *goreng* atau *frozen*\n\u2022 Jumlah: *6* atau *12* pcs\n\nMintu hitung ongkirnya setelah pesanan lengkap ya Kak.";
-  try {
-    await sendWhatsAppMessage(from, reply);
-    log("sbsr-maps-bare-intercept", "from=" + from + " replied with cart prompt; lat=" + coords.lat.toFixed(4) + " lng=" + coords.lng.toFixed(4));
-  } catch (e) {
-    log("sbsr-maps-bare-intercept", "send err: " + e.message);
-    return false;
-  }
-  setPendingBridgeContext(from, [
-    "Bridge sudah simpan pin Maps customer dan minta sebut menu (varian + form + qty).",
-    `Pin: ${url}`,
-    "Customer belum sebut menu.",
-    "JANGAN tanya alamat/pin lagi \u2014 sudah disimpan.",
-    "Kalau customer balas teks pesan menu (mis. 'RA goreng 6'), parse \u2192 cart, dan deterministic flow akan lanjut ke quote setelah customer kirim nama+alamat penerima.",
-  ].join("\n"));
-  return true;
-}
+function tryHandleBareMapsUrl() { return null; }
 // Alias used inside tryHandleBareMapsUrl so a future rename of resolveGmapsUrlBridge
 // only needs touching one line.
 const resolveGmapsUrl_BridgeSafe = resolveGmapsUrlBridge;
@@ -2727,92 +2378,9 @@ function geocodeTypedAddressWithFallback() { return mapsGeocode ? mapsGeocode.ge
 function reverseGeocodeCoordsBridge() { return mapsGeocode ? mapsGeocode.reverseGeocodeCoordsBridge.apply(null, arguments) : null; }
 function resolveLocationDisplayBridge() { return mapsGeocode ? mapsGeocode.resolveLocationDisplayBridge.apply(null, arguments) : null; }
 
-async function sendPinConfirmPrompt(from, draft, addressText, url) {
-  // 2026-05-07: Two-tier confirmation copy.
-  // - When BOTH a real typed addressText AND a pin URL are present, we ALWAYS
-  //   ask the customer to confirm they're the same place. Don't try to detect
-  //   mismatch heuristically — opaque shortlinks are unresolvable, and even
-  //   when they resolve, place-name comparisons yield false positives. Just
-  //   ask. The mismatch heuristic remains as an additional ⚠️ when we can
-  //   prove a clear conflict (typed address vs URL place words don't overlap).
-  // - When only one of {address, pin} is present, fall back to the simpler
-  //   single-source confirm.
-  const hasRealAddress = addressText && !addressText.startsWith("(");
-  const hasUrl = !!url;
-  const clearMismatch = hasRealAddress && hasUrl && looksLikeAddressPinMismatch(addressText, url);
+function sendPinConfirmPrompt() { return null; }
 
-  const lines = [
-    "Mintu sudah terima alamat + pin lokasinya 🤍",
-    "",
-    "📍 Alamat: " + (addressText || "(dari pin)"),
-    "🗺️ Pin Maps: " + (url || "(belum ada)"),
-    "",
-  ];
-  if (clearMismatch) {
-    lines.push("⚠️ Mintu lihat tulisan alamat dan pin Maps kelihatannya beda lokasi — yang benar yang mana ya Kak?");
-    lines.push("");
-  } else if (hasRealAddress && hasUrl) {
-    // Address + pin both present but no clear mismatch — still ask explicitly
-    // so the customer compares them rather than just glancing at the pin.
-    lines.push("Mintu mau pastikan: tulisan alamat *dan* pin Maps di atas sama-sama tujuan Kakak ya?");
-    lines.push("");
-  }
-  lines.push("Kalau sudah pas, balas *YA* — Mintu lanjut cek ongkir.");
-  lines.push("Kalau ada yang salah, share ulang pin yang benar atau ketik alamat detailnya.");
-  try { await sendWhatsAppMessage(from, lines.join("\n")); }
-  catch (e) { log("sbsr-pin-confirm", "prompt send err: " + e.message); }
-  setPendingBridgeContext(from, [
-    "Bridge sudah kirim soft-confirm: pin Maps + alamat detail, minta customer balas YA kalau benar.",
-    "STATE: awaiting_pin_confirm. JANGAN fire quote sampai customer balas YA.",
-    "JANGAN ulang minta alamat / pin — sudah disimpan.",
-  ].join("\n"));
-}
-
-async function maybeHandleAddressPinDistanceGate(from, draft, addressText, destination, gmapsLinkForMsg) {
-  const lat = Number(destination?.lat);
-  const lng = Number(destination?.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-  const addr = String(addressText || "").trim();
-  if (!addr || addr.startsWith("(")) return false;
-  const geo = await geocodeAddressTextBridge(addr);
-  if (!geo) return false; // per requirement: geocode fail -> do not block
-  const distKm = haversineKm(geo.lat, geo.lng, lat, lng);
-  log("sbsr-address-pin-check", "distance_km=" + distKm.toFixed(2));
-  if (distKm <= 1.5) return false;
-  log("sbsr-address-pin-check", "mismatch_detected");
-  const d = loadSbsrDraft(from) || draft || {};
-  const locView = await resolveLocationDisplayBridge({
-    decodedPlace: destination?.place_label || destination?.place_address || "",
-    lat,
-    lng,
-    gmapsLink: gmapsLinkForMsg || destination?.gmaps_link || d?.gmaps_link || "",
-  });
-  saveSbsrDraft(from, {
-    ...d,
-    state: "awaiting_address_pin_confirm",
-    address_pin_confirm: {
-      address_text: addr,
-      address_coords: { lat: geo.lat, lng: geo.lng },
-      pin_coords: { lat, lng },
-      gmaps_link: gmapsLinkForMsg || destination?.gmaps_link || d?.gmaps_link || "",
-      place_address: locView.place_address || "",
-      place_label: locView.place_label || "",
-      distance_km: Number(distKm.toFixed(2)),
-    },
-  });
-  const pinView = locView.place_label || "Titik lokasi dari Share Location WhatsApp";
-  await sendWhatsAppMessage(
-    from,
-    "Alamat tertulis dan titik Maps-nya agak berbeda ya Kak 🤍\n\n" +
-    `Alamat: ${addr}\n` +
-    `Titik Maps:\n${pinView}\n\n` +
-    "Yang benar dipakai yang mana?\n" +
-    "1. Pakai alamat tertulis\n" +
-    "2. Pakai pin Maps\n" +
-    "3. Saya kirim ulang"
-  );
-  return true;
-}
+function maybeHandleAddressPinDistanceGate() { return null; }
 
 
 // =====================================================
@@ -2865,90 +2433,7 @@ function isSyntheticMsg(text) {
 }
 
 
-function buildSbsrAddonOfferText(draft) {
-  const useCase = String(draft && draft.use_case || "").trim().toLowerCase();
-  if (useCase === "stock_frozen") {
-    log("sbsr-addon-policy", "use_case=stock_frozen");
-    log("sbsr-addon-policy", "allowed=ADD-CHILI,ADD-THERMAL-REGULER,ADD-THERMAL,ADD-ICE-GEL");
-    return [
-      "sebelum lanjut, mintu mau infokan beberapa add-on yang cocok buat stock frozen ya kak 😊",
-      "",
-      "🌶️ Signature Chili Sauce — 4rb/pouch (50ml)",
-      "Cocok pas mau digoreng nanti",
-      "",
-      "🧊 *Thermal bag — biar tetap frozen selama pengiriman:*",
-      "• Reguler (max 3 pack frozen) — Rp 8.000",
-      "• Premium (max 6 pack frozen) — Rp 30.000",
-      "",
-      "❄️ Ice gel — Rp 3.000/pcs (boleh tambah berapapun)",
-      "",
-      "ada yang mau ditambahkan kak?",
-    ].join("\n");
-  }
-  if (useCase === "makan-langsung") {
-    log("sbsr-addon-policy", "use_case=makan-langsung");
-    log("sbsr-addon-policy", "allowed=ADD-CHILI");
-    return [
-      "Mungkin Kakak mau tambah add-on juga? 🤍",
-      "",
-      "🌶️ Pouch homemade signature chili sauce 50 ml — Rp 4.000",
-      "",
-      "Kalau mau tambah, balas *pouch* atau *chili sauce* ya Kak. Kalau cukup, balas *LANJUT* 🤍",
-    ].join("\n");
-  }
-  if (useCase === "meeting_acara" || useCase === "meeting-acara-kantor") {
-    log("sbsr-addon-policy", "use_case=meeting_acara");
-    log("sbsr-addon-policy", "allowed=chili,mika,minuman");
-    return [
-      "sebelum lanjut, mintu mau tawarkan add-on yang pas buat acara kakak ya 😊",
-      "",
-      "🌶️ Signature Chili Sauce — 4rb/pouch (50ml)",
-      "Cocok pas digoreng, boleh tambah berapapun",
-      "",
-      "🎁 Mika bag (15k)",
-      "Biar tampilannya lebih cantik pas disajikan (khusus pembelian min 2 box isi 6 atau 1 box isi 12)",
-      "",
-      "🥤 Tambah minuman?",
-      "Cocok banget buat acara atau meeting, biar lebih lengkap",
-      "",
-      "yang mau ditambahkan apa nih kak?",
-    ].join("\n");
-  }
-  if (useCase === "gift_hampers" || useCase === "gift-hampers") {
-    log("sbsr-addon-policy", "use_case=gift_hampers");
-    log("sbsr-addon-policy", "allowed=ADD-GREETING,ADD-MIKA-BAG,ADD-CHILI,ADD-THERMAL,ADD-ICE-GEL");
-    return [
-      "sebelum lanjut, mintu kasih beberapa add-on yang cocok buat gift/hampers ya kak 😊",
-      "",
-      "🎁 Buat presentation yang cantik:",
-      "- Thermal bag premium (30k) + ice gel (3rb) + greeting card (3rb)",
-      "- Mika bag (15k) — khusus pembelian min 2 box isi 6 atau 1 box isi 12",
-      "",
-      "🌶️ Signature Chili Sauce — 4rb/pouch (50ml)",
-      "Cocok dijadiin pelengkap di hampers",
-      "",
-      "yang mau ditambahkan apa nih kak?",
-    ].join("\n");
-  }
-  const hasFrozen = Array.isArray(draft.items) && draft.items.some(it => it && it.form === "frozen");
-  const lines = [
-    "Mungkin Kakak mau tambah add-on yang lainnya juga? 🤍",
-    "",
-    "🌶️ Pouch homemade signature chili sauce 50 ml — Rp 4.000",
-    "🥤 Iced Java Tea — Rp 15.000",
-    "🍵 Iced Matcha — Rp 15.000",
-    "🎁 Mika bag — Rp 15.000",
-    "💌 Greeting card (printed) — Rp 3.000",
-  ];
-  if (hasFrozen) {
-    lines.push("🧊 Thermal bag reguler (max 3 pack) — Rp 8.000");
-    lines.push("🧊 Thermal bag premium (max 6 pack) — Rp 30.000");
-    lines.push("🧊 Ice gel — Rp 3.000 / pcs");
-  }
-  lines.push("");
-  lines.push("Kalau mau tambah, balas aja nama add-on-nya ya Kak. Kalau cukup, balas *LANJUT* 🤍");
-  return lines.join("\n");
-}
+function buildSbsrAddonOfferText() { return null; }
 
 function buildSbsrUseCasePromptText() {
   return [
@@ -3439,38 +2924,7 @@ const DEST_CHECK_QUESTION_RE = /\b(cek|liat|lihat)\b[\s\S]{0,20}\b(dikirim|tujua
 const ONGKIR_CHECK_RE = /\b(?:ongkir(?:nya)?|tarif|biaya|kirim(?:an|nya)?)\b/i;
 const ONGKIR_QUESTION_HINT_RE = /\b(berapa|brp|cek|gimana|gmn|brapa)\b|\?\s*$/i;
 
-function runQuoteFor(from, draft, courierPref) {
-  return new Promise((resolve) => {
-    if (!draft.destination) return resolve(null);
-    // Defensive: derive frozen from cart items rather than hardcoding false.
-    // The 3-courier comparison normally short-circuits on frozen at the
-    // tryHandleOngkirCheck level, but if that gate is bypassed (e.g. cart
-    // classifier missed form='frozen' for fuzzy phrasing) the script itself
-    // still needs the right flag to pick cold-chain couriers.
-    const frozen = (draft.items || []).some(it => it.form === 'frozen');
-    const payload = JSON.stringify({
-      phone: from,
-      items: draft.items,
-      destination: { ...draft.destination },
-      frozen,
-      customerPreference: courierPref,
-    });
-    const cp = require("child_process");
-    const child = cp.spawn("docker", [
-      "exec", "-i", "sbsr-openclaw-1",
-      "node", "/data/sentuhrasa-pdf/scripts/sentuh-quote.mjs",
-    ], { timeout: 30000 });
-    let stdout = "";
-    child.stdout.on("data", c => stdout += c);
-    child.on("close", () => {
-      try {
-        const parsed = parseScriptJSON(stdout);
-        resolve(parsed && parsed.ok ? parsed : null);
-      } catch { resolve(null); }
-    });
-    child.stdin.end(payload);
-  });
-}
+function runQuoteFor() { return null; }
 
 
 // =====================================================
@@ -3655,9 +3109,7 @@ const SBSR_TRANSIENT_RESET_STATES = new Set([
   "pending_quote",
 ]);
 
-function shouldResetSbsrSessionOnReentry(text) {
-  return SBSR_SESSION_REENTRY_RE.test(String(text || "").trim());
-}
+function shouldResetSbsrSessionOnReentry() { return stateManager ? stateManager.shouldResetSessionOnReentry.apply(null, arguments) : null; }
 
 const SBSR_RESTART_INTENT_RE = /^(?:hi|hello|halo|hai|menu|mulai\s+lagi|restart|ulang|start|reset)\b/i;
 const SBSR_MANUAL_RESET_RE = /^(?:reset|mulai\s+lagi|start\s+over|test\s+ulang)\s*$/i;
@@ -3731,14 +3183,7 @@ function isOrderLikeText(text) {
   return /\b(?:ayam\s*sayur|smoked\s*beef|ragout\s*creamy|mercon|chili\s*oil|pedas|ayam\s*merchon|original|creamy\s*chicken|mix\s*risol)\b/i.test(t) ||
          /\b(?:risol|risoles)\b.*\b(?:goreng|frozen|6\s*pcs|12\s*pcs|6pcs|12pcs)\b/i.test(t);
 }
-function isCheckoutActiveState(state) {
-  const s = String(state || "").trim().toLowerCase();
-  return [
-    "awaiting_invoice_confirm","awaiting_payment_proof","awaiting_proof","awaiting_delivery_method","awaiting_name",
-    "awaiting_addon_reply","awaiting_pin_confirm","awaiting_address_pin_confirm","payment_review_pending",
-    "awaiting_manual_payment_review","awaiting_address","awaiting_location","awaiting_usecase","awaiting_product_selection","awaiting_order_confirm"
-  ].includes(s);
-}
+function isCheckoutActiveState() { return stateManager ? stateManager.isCheckoutActive.apply(null, arguments) : null; }
 
 
 
@@ -6335,7 +5780,7 @@ function formatFaqForLLM() { return catalogManager ? catalogManager.formatFaqFor
 // ═══════════════════════════════════════════════════════════════════
 // ── State manager delegations ─────────────────────────────────────
 function clearSbsrCheckoutForCancel(f){return stateManager?stateManager.clearCheckoutForCancel(f):false}
-function isProtectedPaymentFlowDraft(d){return stateManager?stateManager.isProtectedPaymentFlow(d):false}
+function isProtectedPaymentFlowDraft() { return stateManager ? stateManager.isProtectedPaymentFlow.apply(null, arguments) : null; }
 function resetSbsrCheckoutState(f){return stateManager?stateManager.resetCheckoutState(f):false}
 function hardResetSbsrSession(f){return stateManager?stateManager.hardResetSession(f):true}
 
