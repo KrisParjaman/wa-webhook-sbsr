@@ -9489,7 +9489,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
             const _pack = _pendItems.length > 0
               ? _pendItems.reduce((s,it) => s + (Number(it.qty)||1), 0)
               : 6;
-            const _form = /frozen/i.test(_summary) ? "frozen" : "goreng";
+            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
             const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
             saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_order_summary:null, pending_items:null, state:"awaiting_delivery_method" });
             log("llm-classifier", "proceed_detected → awaiting_delivery_method price=" + _price + " pack=" + _pack);
@@ -9570,7 +9570,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
               _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
             }
             const _pack = _pendItems.length > 0 ? _pendItems.reduce((s,it) => s+(Number(it.qty)||1),0) : 6;
-            const _form = /frozen/i.test(_summary) ? "frozen" : "goreng";
+            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
             const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
             saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_items:null, pending_order_summary:null, state:"awaiting_delivery_method" });
             log("llm-classifier", "confirm→lanjut price=" + _price + " pack=" + _pack);
@@ -10463,8 +10463,8 @@ async function handleMessage(msg, contacts) {
               _pack = _total > 0 ? _total : 6;
             }
           }
-          // Determine form
-          const _form = /frozen/i.test(_summary) ? 'frozen' : 'goreng';
+          // Determine form — use use_case (set by tryHandleUseCaseRouter), not summary text
+          const _form = String(_bd.use_case || "").includes("frozen") ? 'frozen' : 'goreng';
           const _name = 'Risol ' + (_form === 'frozen' ? 'Frozen' : 'Goreng') + ' — Mix ' + _pack + 'pcs';
           saveSbsrDraft(from, {
             ..._bd,
