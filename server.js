@@ -16,6 +16,7 @@ let paymentEngine = null;
 let draftStore = null;
 let gsheetSync = null;
 let stateManager = null;
+let mapsGeocode = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -25,6 +26,7 @@ try {
   draftStore = require("./lib/draft-store.cjs");
   gsheetSync = require("./lib/gsheet-sync.cjs");
   stateManager = require("./lib/state-manager.cjs");
+  mapsGeocode = require("./lib/maps-geocode.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -1993,365 +1995,33 @@ function sniffMapsLinkFromCustomer(from, userText) {
 // Resolve a Google Maps short URL to {lat,lng} via redirect-following + regex.
 // Mirrors sentuh-quote.mjs resolveGmapsUrl so the bridge can validate URLs before
 // committing to a deterministic intercept reply. Returns null if no coords extractable.
-const SBSR_GMAPS_COORD_PATTERNS = [
+const SBSR_GMAPS_COORD_PATTERNS = (mapsGeocode && mapsGeocode.SBSR_GMAPS_COORD_PATTERNS) || [
   /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
   /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
   /(?:[?&#]|^)q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i,
   /(?:[?&#]|^)ll=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i,
   /[?&#]destination=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[&#]|$)/i,
 ];
-const SBSR_GMAPS_DIRECT_PATTERNS = [
+const SBSR_GMAPS_DIRECT_PATTERNS = (mapsGeocode && mapsGeocode.SBSR_GMAPS_DIRECT_PATTERNS) || [
   { kind: "!3d!4d", re: /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i },
   { kind: "q=lat,lng", re: /(?:[?&#]|^)q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i },
   { kind: "@lat,lng", re: /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,|$)/ },
   { kind: "ll=lat,lng", re: /(?:[?&#]|^)ll=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:[&#/]|$)/i },
   { kind: "destination=lat,lng", re: /[?&#]destination=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[&#]|$)/i },
 ];
-const SBSR_GMAPS_HOST_RE = /^https?:\/\/(?:[a-z0-9.-]*\.)?(?:maps\.app\.goo\.gl|goo\.gl\/maps|maps\.google\.com|google\.com\/maps)\/?/i;
-const SBSR_GMAPS_RESOLVE_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36";
-function isSbsrCoordInRegion(lat, lng) {
-  return isFinite(lat) && isFinite(lng) && lat >= -11 && lat <= 6 && lng >= 95 && lng <= 141;
-}
-function finalizeSbsrCoords(lat, lng) {
-  if (!isFinite(lat) || !isFinite(lng)) return null;
-  // Hard-reject known Singapore range that has caused false geocodes.
-  if (lat >= 0.5 && lat <= 2.0 && lng >= 103.0 && lng <= 104.5) {
-    log("gmaps-resolve", "rejected_outside_indonesia");
-    return null;
-  }
-  if (!isSbsrCoordInRegion(lat, lng)) {
-    log("gmaps-resolve", "rejected_outside_indonesia");
-    return null;
-  }
-  return { lat, lng };
-}
-function decodeMapsPlaceFromUrlBridge(inputUrl) {
-  try {
-    const u = new URL(String(inputUrl || ""));
-    const m = u.pathname.match(/\/maps\/place\/([^/]+)/i);
-    if (m && m[1]) {
-      const cleaned = m[1]
-        .replace(/\+/g, " ")
-        .replace(/\/data=.*/i, "")
-        .trim();
-      const decoded = decodeURIComponent(cleaned).trim();
-      if (decoded) return decoded;
-    }
-    // ?q=PLACE_NAME fallback — covers maps.google.com?q=... (in-chat share / g_st=ic)
-    const qm = String(inputUrl).match(/[?&]q=([^&#]+)/);
-    if (qm) {
-      const name = decodeURIComponent(qm[1].replace(/\+/g, " ")).trim();
-      if (name && !/^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(name)) return name;
-    }
-    return null;
-  } catch (_) {
-    return null;
-  }
-}
-function buildPlaceGeocodeCandidates(place) {
-  const base = normalizeSpaces(place);
-  if (!base) return [];
-  log("gmaps-normalize", "source=decoded_place_only");
-  const candidates = [];
-  const push = (v) => {
-    const n = normalizeSpaces(v);
-    if (!n) return;
-    if (!candidates.includes(n)) candidates.push(n);
-  };
-  // A) full decoded place
-  push(base);
-  // B) remove business prefix before first comma
-  const firstComma = base.indexOf(",");
-  if (firstComma > 0 && firstComma < base.length - 1) {
-    push(base.slice(firstComma + 1));
-  }
-  // C) remove RT/RW, blok, postal code
-  const c1 = base
-    .replace(/\bRT\.?\s*\d+\s*\/\s*RW\.?\s*\d+\b/gi, " ")
-    .replace(/\bRT\.?\s*\d+\b/gi, " ")
-    .replace(/\bRW\.?\s*\d+\b/gi, " ")
-    .replace(/\bBlok\s*[A-Za-z0-9-]+\b/gi, " ")
-    .replace(/\bNo\.?\s*\d+[A-Za-z0-9-]*\b/gi, " ")
-    .replace(/\b\d{5}\b/g, " ");
-  push(c1);
-  // D) street + district + city
-  const street = (base.match(/\bJl\.?[^,]*/i) || [])[0] || "";
-  const district = (base.match(/\b(?:Kecamatan|Kec)\s*[^,]*/i) || [])[0] || "";
-  const city = (base.match(/\b(?:Kota|Kabupaten|Kab)\s*[^,]*/i) || [])[0] || "";
-  push([street, district, city].filter(Boolean).join(", "));
-  // E) locality-focused candidates from comma segments (more resilient for maps.app place shares)
-  const segs = base.split(",").map(s => normalizeSpaces(s)).filter(Boolean);
-  if (segs.length >= 3) {
-    push(segs.slice(-4).join(", "));
-    push(segs.slice(-3).join(", "));
-  }
-  const placeL = base.toLowerCase();
-  const filtered = [];
-  for (const cand of candidates) {
-    const cL = String(cand || "").toLowerCase();
-    // Block pollution: never mutate pin context from decoded_place into typed-address city.
-    if (/(jakarta selatan|tebet)/i.test(placeL) && /(jakarta timur|jatinegara|cipinang)/i.test(cL)) {
-      log("gmaps-normalize", "blocked_typed_address_pollution");
-      continue;
-    }
-    if (/(jakarta timur|jatinegara|cipinang)/i.test(placeL) && /(jakarta selatan|tebet)/i.test(cL)) {
-      log("gmaps-normalize", "blocked_typed_address_pollution");
-      continue;
-    }
-    filtered.push(cand);
-  }
-  for (let i = 0; i < filtered.length; i++) {
-    log("gmaps-normalize", `candidate[${i}]=${filtered[i]}`);
-  }
-  return filtered;
-}
-async function geocodeMapsPlaceBridge(place, finalUrl, sourceType = "") {
-  if (!place) return null;
-  log("gmaps-resolve", "decoded_place=" + place);
+const SBSR_GMAPS_HOST_RE = (mapsGeocode && mapsGeocode.SBSR_GMAPS_HOST_RE) || /^https?:\/\/(?:[a-z0-9.-]*\.)?(?:maps\.app\.goo\.gl|goo\.gl\/maps|maps\.google\.com|google\.com\/maps)\/?/i;
+const SBSR_GMAPS_RESOLVE_UA = (mapsGeocode && mapsGeocode.SBSR_GMAPS_RESOLVE_UA) || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36";
+function isSbsrCoordInRegion() { return mapsGeocode ? mapsGeocode.isSbsrCoordInRegion.apply(null, arguments) : null; }
+function finalizeSbsrCoords() { return mapsGeocode ? mapsGeocode.finalizeSbsrCoords.apply(null, arguments) : null; }
+function decodeMapsPlaceFromUrlBridge() { return mapsGeocode ? mapsGeocode.decodeMapsPlaceFromUrlBridge.apply(null, arguments) : null; }
+function buildPlaceGeocodeCandidates() { return mapsGeocode ? mapsGeocode.buildPlaceGeocodeCandidates.apply(null, arguments) : null; }
+function geocodeMapsPlaceBridge() { return mapsGeocode ? mapsGeocode.geocodeMapsPlaceBridge.apply(null, arguments) : null; }
+function parseDirectGmapsCoordsBridge() { return mapsGeocode ? mapsGeocode.parseDirectGmapsCoordsBridge.apply(null, arguments) : null; }
+function extractCoordsFromMapsUrlBridge() { return mapsGeocode ? mapsGeocode.extractCoordsFromMapsUrlBridge.apply(null, arguments) : null; }
+function fetchMapsRedirectUrlBridge() { return mapsGeocode ? mapsGeocode.fetchMapsRedirectUrlBridge.apply(null, arguments) : null; }
+function resolveGmapsUrlBridge() { return mapsGeocode ? mapsGeocode.resolveGmapsUrlBridge.apply(null, arguments) : null; }
 
-  // Opsi C: try Google Geocoding API first (components=country:ID for better accuracy)
-  const _googleKey = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_API_KEY || "";
-  if (_googleKey && place.length >= 3) {
-    try {
-      const _gUrl = "https://maps.googleapis.com/maps/api/geocode/json"
-        + "?address=" + encodeURIComponent(place)
-        + "&components=country%3AID"
-        + "&key=" + _googleKey
-        + "&language=id&region=id";
-      const _gRes = await fetch(_gUrl, { signal: AbortSignal.timeout(5000) });
-      const _gData = await _gRes.json().catch(() => null);
-      if (_gData && _gData.status === "OK" && _gData.results?.[0]) {
-        const _gLoc = _gData.results[0].geometry.location;
-        const _gCoords = finalizeSbsrCoords(Number(_gLoc.lat), Number(_gLoc.lng));
-        if (_gCoords) {
-          log("gmaps-geocode", `google_api lat=${_gCoords.lat} lng=${_gCoords.lng}`);
-          return { ..._gCoords, address_text: place, confidence: "high", decoded_place: place, geocode_display: _gData.results[0].formatted_address || "" };
-        }
-      }
-    } catch (_) {}
-  }
-
-  const candidates = buildPlaceGeocodeCandidates(place);
-  const preferJakarta = isJakartaLikeHint(place) || isJakartaLikeHint(finalUrl);
-  const sourceIsMapsApp = /maps_app|gmaps_link/.test(String(sourceType || ""));
-  for (const cand of candidates) {
-    log("gmaps-geocode", "trying=" + cand);
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    try {
-      const url = new URL("https://nominatim.openstreetmap.org/search");
-      url.searchParams.set("q", cand);
-      url.searchParams.set("format", "jsonv2");
-      url.searchParams.set("limit", "5");
-      const res = await fetch(url.toString(), {
-        signal: ctrl.signal,
-        headers: { "User-Agent": SBSR_GMAPS_RESOLVE_UA },
-      });
-      if (!res.ok) continue;
-      const rows = await res.json();
-      if (!Array.isArray(rows) || rows.length === 0) continue;
-      for (const row of rows) {
-        const lat = parseFloat(row?.lat);
-        const lng = parseFloat(row?.lon);
-        const coords = finalizeSbsrCoords(lat, lng);
-        if (!coords) {
-          log("gmaps-geocode", "rejected_non_id");
-          continue;
-        }
-        const display = String(row?.display_name || "");
-        if (hasWestJavaHint(place) && hasJakartaHint(display)) {
-          log("gmaps-resolve", "semantic_city_mismatch");
-          continue;
-        }
-        if (preferJakarta && !isJakartaLikeHint(display)) continue;
-        const candClean = normalizeSpaces(cand);
-        const placeRegion = await extractSemanticRegion(place);
-        const displayRegion = await extractSemanticRegion(display);
-        let confidence = "medium";
-        const hasStreetSignal = /\bjl\.?\b|\bno\.?\s*\d+/i.test(candClean);
-        if (hasStreetSignal && candClean.length >= 12) confidence = "high";
-        if (placeRegion && displayRegion && placeRegion !== displayRegion) confidence = "low";
-        if (!hasStreetSignal && candClean.length < 8 && sourceIsMapsApp) confidence = "medium";
-        log("gmaps-geocode", `accepted lat=${coords.lat} lng=${coords.lng}`);
-        log("gmaps-resolve", `geocode parsed lat=${coords.lat} lng=${coords.lng}`);
-        log("gmaps-resolve", "resolved via decoded_place_geocode");
-        return { ...coords, address_text: cand, confidence, decoded_place: place, geocode_display: display };
-      }
-    } catch (_) {
-      // try next candidate
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return null;
-}
-function parseDirectGmapsCoordsBridge(input) {
-  const text = String(input || "").trim();
-  if (!text) return null;
-  for (const p of SBSR_GMAPS_DIRECT_PATTERNS) {
-    const m = text.match(p.re);
-    if (!m) continue;
-    const lat = parseFloat(m[1]);
-    const lng = parseFloat(m[2]);
-    const coords = finalizeSbsrCoords(lat, lng);
-    if (!coords) return null;
-    log("gmaps-parser", p.kind === "q=lat,lng" ? "direct q=lat,lng detected" : `direct ${p.kind} detected`);
-    log("gmaps-parser", `parsed lat=${coords.lat} lng=${coords.lng}`);
-    log("gmaps-parser", "skipping remote resolve");
-    return coords;
-  }
-  // raw "lat,lng"
-  const mRaw = text.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (mRaw) {
-    const lat = parseFloat(mRaw[1]);
-    const lng = parseFloat(mRaw[2]);
-    const coords = finalizeSbsrCoords(lat, lng);
-    if (!coords) return null;
-    log("gmaps-parser", "direct q=lat,lng detected");
-    log("gmaps-parser", `parsed lat=${coords.lat} lng=${coords.lng}`);
-    log("gmaps-parser", "skipping remote resolve");
-    return coords;
-  }
-  return null;
-}
-function extractCoordsFromMapsUrlBridge(input) {
-  const text = String(input || "").trim();
-  if (!text) return null;
-  for (const re of SBSR_GMAPS_COORD_PATTERNS) {
-    const m = text.match(re);
-    if (!m) continue;
-    const lat = parseFloat(m[1]);
-    const lng = parseFloat(m[2]);
-    const coords = finalizeSbsrCoords(lat, lng);
-    if (!coords) return null;
-    log("gmaps-resolve", `parsed lat=${coords.lat} lng=${coords.lng}`);
-    return coords;
-  }
-  return null;
-}
-async function fetchMapsRedirectUrlBridge(current) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    return await fetch(current, {
-      redirect: "manual",
-      signal: ctrl.signal,
-      headers: { "User-Agent": SBSR_GMAPS_RESOLVE_UA },
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function resolveGmapsUrlBridge(url) {
-  if (!url || typeof url !== "string") return null;
-  log("gmaps-resolve", "original=" + String(url).slice(0, 300));
-  if (/maps\.app\.goo\.gl/i.test(url)) log("gmaps-resolve", "resolved_from_maps_app");
-  const direct = parseDirectGmapsCoordsBridge(url);
-  if (direct) { log("gmaps-resolve", "extracted_coordinates"); return direct; }
-  if (!SBSR_GMAPS_HOST_RE.test(url)) {
-    log("gmaps-resolve", "failed reason=no-valid-coordinate-pattern");
-    return null;
-  }
-
-  let current = String(url).trim();
-  let finalUrl = current;
-  for (let i = 0; i < 5; i++) {
-    let r;
-    try {
-      r = await fetchMapsRedirectUrlBridge(current);
-    } catch (e) {
-      log("gmaps-resolve", `fetch failed: ${e && e.message ? e.message : e}`);
-      break;
-    }
-    const loc = r.headers.get("location");
-    if (loc && [301, 302, 303, 307, 308].includes(r.status)) {
-      const next = loc.startsWith("http") ? loc : new URL(loc, current).toString();
-      log("gmaps-resolve", `redirect status=${r.status}`);
-      log("gmaps-resolve", `location=${next}`);
-      log("gmaps-resolve", "redirect_followed");
-      current = next;
-      finalUrl = next;
-      log("gmaps-resolve", `final_url=${finalUrl}`);
-      const parsed = extractCoordsFromMapsUrlBridge(finalUrl);
-      if (parsed) { log("gmaps-resolve", "extracted_coordinates"); return parsed; }
-      continue;
-    }
-    finalUrl = current;
-    break;
-  }
-  const parsedFinal = extractCoordsFromMapsUrlBridge(finalUrl);
-  if (parsedFinal) { log("gmaps-resolve", "extracted_coordinates"); return parsedFinal; }
-  // BUG#2 fix: HTML fallback — fetch final URL and parse coords from page content
-  try {
-    log("gmaps-recover", "fallback_html_parse");
-    const _hCtrl = new AbortController();
-    const _hTimer = setTimeout(() => _hCtrl.abort(), 8000);
-    let _hText = null;
-    try {
-      const _hRes = await fetch(finalUrl, {
-        redirect: "follow",
-        signal: _hCtrl.signal,
-        headers: { "User-Agent": SBSR_GMAPS_RESOLVE_UA },
-      });
-      _hText = await _hRes.text();
-    } finally { clearTimeout(_hTimer); }
-    if (_hText) {
-      for (const _hRe of SBSR_GMAPS_COORD_PATTERNS) {
-        const _hM = _hText.match(_hRe);
-        if (_hM) {
-          const _hC = finalizeSbsrCoords(parseFloat(_hM[1]), parseFloat(_hM[2]));
-          if (_hC) { log("gmaps-recover", "fallback_html_parse"); return _hC; }
-        }
-      }
-      const _hOg = (_hText.match(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i) ||
-                    _hText.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:url"/i) || [])[1];
-      const _hCan = (_hText.match(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i) || [])[1];
-      for (const _hUrl of [_hOg, _hCan].filter(Boolean)) {
-        const _hCoords = extractCoordsFromMapsUrlBridge(_hUrl);
-        if (_hCoords) { log("gmaps-recover", "extracted_from_canonical"); return _hCoords; }
-      }
-    }
-  } catch (_hErr) {
-    log("gmaps-recover", "html_fetch_err=" + (_hErr && _hErr.message ? _hErr.message : String(_hErr)));
-  }
-  log("gmaps-resolve", "strict_failed_try_place_geocode");
-  const decodedPlace = decodeMapsPlaceFromUrlBridge(finalUrl);
-  if (decodedPlace) {
-    log("gmaps-resolve", "extracted_place_query");
-    const sourceType = /maps\.app\.goo\.gl/i.test(url) ? "maps_app" : "gmaps_link";
-    const geo = await geocodeMapsPlaceBridge(decodedPlace, finalUrl, sourceType);
-    if (geo) return geo;
-    if (sourceType === "maps_app" && !hasJakartaHint(decodedPlace)) {
-      log("gmaps-resolve", "fallback_blocked");
-    }
-    return {
-      unresolved: true,
-      source: sourceType,
-      decoded_place: decodedPlace,
-      final_url: finalUrl,
-      original_url: String(url || ""),
-    };
-  }
-  log("gmaps-resolve", `final_url=${finalUrl}`);
-  log("gmaps-resolve", "failed reason=no-valid-coordinate-pattern");
-  return null;
-}
-
-function parseScriptJSON(stdout) {
-  if (!stdout) return null;
-  const text = String(stdout);
-  try { return JSON.parse(text.trim()); } catch (_) {}
-  const lines = text.split(/\r?\n/);
-  for (let endIdx = lines.length - 1; endIdx >= 0; endIdx--) {
-    if (lines[endIdx].trim() !== "}") continue;
-    for (let startIdx = endIdx - 1; startIdx >= 0; startIdx--) {
-      if (!lines[startIdx].startsWith("{")) continue;
-      try { return JSON.parse(lines.slice(startIdx, endIdx + 1).join("\n")); }
-      catch (_) { break; }
-    }
-  }
-  return null;
-}
+function parseScriptJSON() { return mapsGeocode ? mapsGeocode.parseScriptJSON.apply(null, arguments) : null; }
 
 // =====================================================
 // LLM-Assisted Semantic Address Verification (secondary layer)
@@ -3342,156 +3012,13 @@ function looksLikeAddressPinMismatch(addressText, url) {
   return !overlap;
 }
 
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const toRad = (d) => (Number(d) * Math.PI) / 180;
-  const R = 6371;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
+function haversineKm() { return mapsGeocode ? mapsGeocode.haversineKm.apply(null, arguments) : null; }
 
-async function geocodeAddressTextBridge(addressText) {
-  const q = String(addressText || "").trim();
-  if (!q || q.length < 8) return null;
-  const googleKey = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_API_KEY || "";
-  if (googleKey) {
-    try {
-      const enc = encodeURIComponent(q);
-      const gUrl = "https://maps.googleapis.com/maps/api/geocode/json?address=" + enc + "&key=" + googleKey + "&language=id&region=id";
-      const gRes = await fetch(gUrl, { signal: AbortSignal.timeout(5000) });
-      const gData = await gRes.json().catch(() => null);
-      if (gData && gData.status === "OK" && Array.isArray(gData.results) && gData.results.length > 0) {
-        const loc = gData.results[0].geometry.location;
-        const lat = Number(loc.lat);
-        const lng = Number(loc.lng);
-        if (Number.isFinite(lat) && Number.isFinite(lng) && lat <= 6 && lat >= -11 && lng >= 95 && lng <= 141) {
-          return { lat, lng };
-        }
-      }
-    } catch (e) {
-      log("[sbsr-geocode-google-err] " + (e.message || "").slice(0, 60));
-    }
-  }
-  try {
-    const url = new URL("https://nominatim.openstreetmap.org/search");
-    url.searchParams.set("q", q);
-    url.searchParams.set("format", "jsonv2");
-    url.searchParams.set("limit", "1");
-    url.searchParams.set("countrycodes", "id");
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-      },
-    });
-    const rows = await res.json().catch(() => []);
-    if (!Array.isArray(rows) || rows.length === 0) return null;
-    const lat = Number(rows[0].lat);
-    const lng = Number(rows[0].lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    if (lat > 6 || lat < -11 || lng < 95 || lng > 141) return null;
-    return { lat, lng };
-  } catch { return null; }
-}
-function buildTypedAddressCandidates(addressText) {
-  const base = normalizeSpaces(addressText);
-  if (!base) return [];
-  const out = [];
-  const push = (v) => {
-    const n = normalizeSpaces(v);
-    if (!n) return;
-    if (!out.includes(n)) out.push(n);
-  };
-  push(base);
-  // remove detail number/block
-  push(base
-    .replace(/\bBlok\s*[A-Za-z0-9-]+\b/gi, " ")
-    .replace(/\bNo\.?\s*\d+[A-Za-z0-9-]*\b/gi, " ")
-  );
-  const street = (base.match(/\bJl\.?[^,]*/i) || [])[0] || "";
-  const kel = (base.match(/\b(?:Kelurahan|Kel\.?)\s*[^,]*/i) || [])[0] || (/\bcipinang muara\b/i.test(base) ? "Cipinang Muara" : "");
-  const kec = (base.match(/\b(?:Kecamatan|Kec\.?)\s*[^,]*/i) || [])[0] || (/\bjatinegara\b/i.test(base) ? "Jatinegara" : "");
-  const city = (base.match(/\b(?:Kota|Kabupaten|Kab)\s*[^,]*/i) || [])[0] || (/\bjakarta\b/i.test(base) ? "Jakarta Timur" : "");
-  push([street, kel, kec, city].filter(Boolean).join(", "));
-  push([kel, kec, city].filter(Boolean).join(", "));
-  push([kec, city].filter(Boolean).join(", "));
-  return out;
-}
-async function geocodeTypedAddressWithFallback(addressText) {
-  const cands = buildTypedAddressCandidates(addressText);
-  for (const c of cands) {
-    log("sbsr-address-pin-check", "typed_geocode_try=" + c);
-    const geo = await geocodeAddressTextBridge(c);
-    if (geo && Number.isFinite(Number(geo.lat)) && Number.isFinite(Number(geo.lng))) {
-      log("sbsr-address-pin-check", "typed_geocode_success lat=" + Number(geo.lat).toFixed(6) + " lng=" + Number(geo.lng).toFixed(6));
-      return geo;
-    }
-  }
-  log("sbsr-address-pin-check", "typed_geocode_failed");
-  return null;
-}
-async function reverseGeocodeCoordsBridge(lat, lng) {
-  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) return null;
-  try {
-    const url = new URL("https://nominatim.openstreetmap.org/reverse");
-    url.searchParams.set("lat", String(lat));
-    url.searchParams.set("lon", String(lng));
-    url.searchParams.set("format", "jsonv2");
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-      },
-    });
-    const row = await res.json().catch(() => null);
-    if (!row || !row.address) return null;
-    const a = row.address || {};
-    const parts = [
-      a.suburb, a.village, a.town, a.city, a.county, a.state, a.country,
-    ].filter(Boolean);
-    return {
-      display: String(row.display_name || parts.join(", ")).trim(),
-      city: a.city || a.town || a.village || "",
-      district: a.city_district || a.suburb || a.neighbourhood || a.quarter || "",
-      county: a.county || "",
-      state: a.state || "",
-      country: a.country || "",
-    };
-  } catch {
-    return null;
-  }
-}
-async function resolveLocationDisplayBridge({ decodedPlace = "", lat = null, lng = null, gmapsLink = "" } = {}) {
-  const fromDecoded = String(decodedPlace || "").trim();
-  if (fromDecoded) {
-    log("location-display", "resolved_address=" + fromDecoded);
-    log("location-display", "source=decoded_place");
-    return { place_address: fromDecoded, place_label: fromDecoded, source: "decoded_place" };
-  }
-  if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) {
-    const rev = await reverseGeocodeCoordsBridge(Number(lat), Number(lng));
-    const revText = String(rev?.display || "").trim();
-    if (revText) {
-      log("location-display", "resolved_address=" + revText);
-      log("location-display", "source=reverse_geocode");
-      return { place_address: revText, place_label: revText, source: "reverse_geocode" };
-    }
-  }
-  const link = String(gmapsLink || "").trim();
-  if (link) {
-    log("location-display", "resolved_address=" + link);
-    log("location-display", "source=gmaps_link");
-    return { place_address: link, place_label: link, source: "gmaps_link" };
-  }
-  const fallback = (Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)))
-    ? `${Number(lat)},${Number(lng)}`
-    : "";
-  log("location-display", "resolved_address=" + fallback);
-  log("location-display", "source=latlng_fallback");
-  return { place_address: fallback, place_label: fallback, source: "latlng_fallback" };
-}
+function geocodeAddressTextBridge() { return mapsGeocode ? mapsGeocode.geocodeAddressTextBridge.apply(null, arguments) : null; }
+function buildTypedAddressCandidates() { return mapsGeocode ? mapsGeocode.buildTypedAddressCandidates.apply(null, arguments) : null; }
+function geocodeTypedAddressWithFallback() { return mapsGeocode ? mapsGeocode.geocodeTypedAddressWithFallback.apply(null, arguments) : null; }
+function reverseGeocodeCoordsBridge() { return mapsGeocode ? mapsGeocode.reverseGeocodeCoordsBridge.apply(null, arguments) : null; }
+function resolveLocationDisplayBridge() { return mapsGeocode ? mapsGeocode.resolveLocationDisplayBridge.apply(null, arguments) : null; }
 
 async function sendPinConfirmPrompt(from, draft, addressText, url) {
   // 2026-05-07: Two-tier confirmation copy.
@@ -6509,6 +6036,8 @@ function _initEngine() {
     getAvailability: function() { return catalogAvailability; },
     log: log,
   });
+  // Init maps-geocode
+  if (mapsGeocode) mapsGeocode.init({ log: log });
   // Init state-manager
   if (stateManager) stateManager.init({
     loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, log: log,
