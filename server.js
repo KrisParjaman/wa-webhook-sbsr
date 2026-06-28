@@ -23,6 +23,7 @@ let mediaUtils = null;
 let ocrUtils = null;
 let textUtils = null;
 let msgProcessor = null;
+let agentCore = null;
 try {
   engineCtx = require("./lib/engine/context.cjs");
   enginePipeline = require("./lib/engine/pipeline.cjs");
@@ -39,6 +40,7 @@ try {
   ocrUtils = require("./lib/ocr-utils.cjs");
   textUtils = require("./lib/text-utils.cjs");
   msgProcessor = require("./lib/process-message.cjs");
+  agentCore = require("./lib/agent/core.cjs");
 } catch (e) {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
@@ -2978,6 +2980,11 @@ function _initEngine() {
     getAvailability: function() { return catalogAvailability; },
     log: log,
   });
+  // Init agent-core
+  if (agentCore) {
+    agentCore.init({ sendToLLM: sendToOpenClaw, sendReply: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, catalogRef: function() { return loadProductCatalog(); } });
+    try { require('./lib/handlers/handler-agent.cjs').init(agentCore); } catch (_) {}
+  }
   // Init msg-processor
   if (msgProcessor) msgProcessor.init({ sendToOpenClaw: sendToOpenClaw, sendMessage: sendWhatsAppMessage, log: log, loadDraft: loadSbsrDraft, saveDraft: saveSbsrDraft, secLib: secLib, admin: admin, engineCtx: engineCtx, enginePipeline: enginePipeline, sbsrLlmClassifierEnabled: sbsrLlmClassifierEnabled, ADMIN_PHONES: ADMIN_PHONES });
   // Init ocr-utils
