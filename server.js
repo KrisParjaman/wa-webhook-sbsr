@@ -11275,7 +11275,10 @@ app.post("/send-image", async (req, res) => {
   log("send-image-auth", "auth source=" + authSource);
   if (!SEND_IMAGE_ACCEPTED_TOKENS.has(String(token || "").trim())) return res.status(401).json({ error: "Unauthorized" });
   if (!to || !file_path) return res.status(400).json({ error: "Missing 'to' or 'file_path'" });
-  const phone = to.replace(/[^0-9]/g, "");
+  let phone = to.replace(/[^0-9]/g, "");
+  // Normalize to international format: 08xx → 628xx (Indonesia)
+  if (/^0\d{7,13}$/.test(phone)) phone = "62" + phone.slice(1);
+  if (/^8\d{7,12}$/.test(phone)) phone = "62" + phone;
 
   let hostPath = file_path;
   if (file_path.startsWith(CONTAINER_DATA_PREFIX)) {
