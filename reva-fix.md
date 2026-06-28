@@ -52,5 +52,4 @@ Branch ini target ke `master`. Semua perubahan harus backward compatible — tid
 
 ### 2026-06-28
 - [x] Branch `sbsr-debloat` dibuat dari master
-- [x] Analisis awal hubungan server.js ↔ 11 file target selesai
 - [x] `reva-fix.md` dibuat sebagai shared notes
