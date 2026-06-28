@@ -10507,9 +10507,26 @@ async function handleMessage(msg, contacts) {
       // GLOBAL LANJUT INTENT: customer accepts "mau lanjut pesan?" -> transition to next step
       const _acceptLanjut = /^(?:ya|iya|ok|oke|lanjut|siap|deal|boleh|mau|yes|yuk|gas|go)(?:\s+(?:lanjut|pesan|order|aja|deh|dong|kak|ya))*$/i.test(_trimText);
       const _hasItems = (_routerDraft && Array.isArray(_routerDraft.items) && _routerDraft.items.length > 0) || (_routerDraft && _routerDraft.cart && Array.isArray(_routerDraft.cart.items) && _routerDraft.cart.items.length > 0);
+      const _hasPendingItems = Array.isArray(_routerDraft?.pending_items) && _routerDraft.pending_items.length > 0;
       const _needsDelivery = !_routerDraft.delivery_mode;
-      if (_acceptLanjut && _needsDelivery) {
-        saveSbsrDraft(from, { ..._routerDraft, state: "awaiting_delivery_method" });
+      if (_acceptLanjut && _needsDelivery && (_hasItems || _hasPendingItems)) {
+        // If only pending_items (natural reply flow), create real items first
+        let _updDraft = _routerDraft;
+        if (!_hasItems && _hasPendingItems) {
+          const _pit = _routerDraft.pending_items;
+          const _form = String(_routerDraft.use_case || "").includes("frozen") ? "frozen" : "goreng";
+          const _pack = _pit.reduce((s,it) => s + (Number(it.qty)||1), 0);
+          const _price = _pit.reduce((sum, it) => {
+            const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
+            if (q <= 3) return sum + (isM ? 33000 : 29000);
+            if (q <= 6) return sum + (isM ? 63000 : 55000);
+            return sum + (isM ? 120000 : 105000);
+          }, 0);
+          const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
+          _updDraft = { ..._routerDraft, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_items:null, pending_order_summary:null };
+          log("sbsr-lanjut", "created_items_from_pending pack=" + _pack + " price=" + _price);
+        }
+        saveSbsrDraft(from, { ..._updDraft, state: "awaiting_delivery_method" });
         await sendSbsrDeliveryMethodButtons(from);
         log("sbsr-lanjut", "accepted -> delivery_method");
         sbsrRouterLogRail("lanjut-accept");
