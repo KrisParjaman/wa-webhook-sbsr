@@ -3159,6 +3159,7 @@ async function handleMessage(msg, contacts) {
   _notifyAdminOnMessage(from, contacts);
 
   try {
+    _initEngine();
     await _processMessage(msg, from, messageId, contactName);
   } catch (err) {
     log("error", "Processing message from " + from + ": " + err.message);
