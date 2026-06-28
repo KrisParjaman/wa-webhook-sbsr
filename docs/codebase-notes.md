@@ -203,6 +203,51 @@ Notif ke admin via `SBSR_FINANCE_PHONES` terpicu pada:
 
 ---
 
+## Goreng/Frozen Loop — Root Cause & Fix
+
+### Root Cause (Split-Brain State)
+
+Bot punya dua "otak" yang state-nya tidak tersinkronisasi:
+- **Bridge deterministic** — simpan state di draft file via `saveSbsrDraft()` (116 call)
+- **OpenClaw LLM** — session memory sendiri, tidak tahu apa yang bridge tulis ke draft
+
+Loop terjadi karena gap antara Gate yang tanya dan handler yang nulis jawaban:
+
+```
+Gate #1 (line ~3687, tryHandleAddressAndQuote):
+  ambiguousRisol = items.filter(it => !it.form)  →  tanya "goreng atau frozen?"
+  setPendingBridgeContext(...)  →  return true (tunggu jawaban)
+
+Customer jawab "goreng"
+  → LLM klasifikasi sebagai choose_option/place_order
+  → LLM reply natural: "Oke Kak, risol goreng ya!"
+  → TIDAK ADA yang menulis it.form = 'goreng' ke draft items
+  → Gate #1 ketemu lagi → tanya lagi → loop ♾️
+```
+
+Gate #2 (line ~6670, WA location handler) punya pola yang persis sama.
+
+### Fix: `tryHandleFormClarification()`
+
+Handler deterministic baru yang jalan **sebelum** LLM classifier. Logika:
+1. Cek apakah ada Risol items dengan `form === null` di draft
+2. Match jawaban customer: `goreng|frozen|matang|mentah|siap makan`
+3. Bulk-update semua null-form items dengan form yang dijawab
+4. Hapus `pending_bridge_context`
+5. Kirim konfirmasi ke customer
+6. Re-trigger `tryHandleAddressAndQuote()` jika alamat sudah ada di draft
+
+Tidak mengubah gate, state machine, atau LLM path — hanya menutup gap yang ada.
+
+### Yang Belum Diselesaikan (Long-Term)
+
+Fix ini menutup gap paling umum, tapi root cause sejati adalah arsitektur dua-otak.
+Solusi permanen: rebuild ke **one-brain agent+tools pattern** (Rosalie pattern) —
+satu agen yang owns state dan conversation, tools deterministic untuk hitung harga/ongkir.
+Lihat `CRITICAL-FINDINGS-sbsr.md` untuk detail.
+
+---
+
 ## Webhook Dedup (Idempotency)
 
 **Aktif secara default.** Meta WA Cloud API bersifat at-least-once delivery — jika bridge tidak ACK dalam ~5 detik, Meta retry dengan `message_id` yang sama. Tanpa dedup, `handleMessage()` dipanggil dua kali → customer menerima reply duplikat.
@@ -247,5 +292,6 @@ File berikut sudah **dihapus** karena one-time migration scripts yang sudah ter-
 | 2026-06 | Location button tidak muncul setelah terima alamat | `sendSbsrLocationPromptMessage` gate pada state — bypass langsung `sendWhatsAppLocationRequest` |
 | 2026-06 | "ok/oke" trigger restart session | Hapus ok/oke dari `SBSR_RESTART_INTENT_RE` |
 | 2026-06 | Customer terima reply duplikat 2-3x | `SBSR_IDEMPOTENT` default OFF — diinvert jadi default ON; dedup aktif tanpa perlu set env var |
+| 2026-06 | Bot loop tanya "goreng atau frozen?" berulang | Gap: Gate #1/#2 tanya tapi tidak ada yang nulis jawaban ke `it.form`. Fix: `tryHandleFormClarification()` — handler deterministic sebelum LLM classifier, bulk-update null-form items |
 | 2026-06 | Catalog & store config baca dari file | Migrasi ke PostgreSQL (`catalog_products`, `store_config`) — lihat `docs/postgres-catalog.md` |
 | 2026-06 | Conversation history hanya di file JSON | Dual-write ke `wa_messages` PostgreSQL + autodelete policy — lihat `docs/postgres-conversations.md` |

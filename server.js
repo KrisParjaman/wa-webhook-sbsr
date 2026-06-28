@@ -9452,6 +9452,60 @@ function buildClassifierPrompt(from, userText, draft, bridgeContext) {
   ].join("\n");
 }
 
+// =====================================================
+// Form Clarification Handler — closes the split-brain gap for goreng/frozen loop
+// =====================================================
+// Gate #1 (tryHandleAddressAndQuote ~line 3687) and Gate #2 (WA location handler
+// ~line 6670) ask "goreng atau frozen?" when cart items have form=null, then set
+// pending_bridge_context and return. When customer replies, the answer previously
+// went to LLM which replied naturally BUT never wrote form back to draft items —
+// so the gates would re-trigger on the next message, creating an infinite loop.
+//
+// This handler runs BEFORE the LLM classifier. It detects the goreng/frozen answer
+// deterministically and bulk-writes .form onto all null-form Risol items, then
+// re-triggers the quote flow if the address is already known.
+async function tryHandleFormClarification(from, userText) {
+  const draft = loadSbsrDraft(from);
+  if (!draft) return false;
+
+  // Only activate when cart has Risol items missing .form
+  const nullFormItems = (draft.items || []).filter(it => /Risol/i.test(it.name || '') && !it.form);
+  if (nullFormItems.length === 0) return false;
+
+  // Match goreng or frozen keywords
+  if (!MISSING_FORM_CLARIFY_RE.test(String(userText || '').trim())) return false;
+
+  const isFrozen = /\b(frozen|beku|mentah|disimpen|stok)\b/i.test(userText);
+  const form = isFrozen ? 'frozen' : 'goreng';
+
+  // Bulk-update all null-form Risol items
+  const updatedItems = (draft.items || []).map(it =>
+    (/Risol/i.test(it.name || '') && !it.form) ? { ...it, form } : it
+  );
+
+  saveSbsrDraft(from, { ...draft, items: updatedItems, pending_bridge_context: null });
+  log('sbsr-form-clarif', 'set form=' + form + ' on ' + nullFormItems.length + ' item(s) for ' + from);
+
+  // Confirm to customer
+  try {
+    await sendWhatsAppMessage(from,
+      form === 'goreng'
+        ? 'Oke Kak, risol *goreng* ya (matang siap makan) 🤍\n\nSebentar Mintu hitung ongkirnya...'
+        : 'Oke Kak, risol *frozen* ya (mentah, bisa disimpen di freezer) 🤍\n\nSebentar Mintu hitung ongkirnya...'
+    );
+  } catch (e) { log('sbsr-form-clarif', 'ack err: ' + e.message); }
+
+  // Re-trigger quote if address is already available in draft
+  const kickoff = (draft.destination && (draft.destination.maps_url || draft.destination.address_text)) || '';
+  if (kickoff) {
+    try {
+      await tryHandleAddressAndQuote(from, kickoff);
+    } catch (e) { log('sbsr-form-clarif', 'requote err: ' + e.message); }
+  }
+
+  return true;
+}
+
 async function classifyIntentWithLLM(from, userText, draft, bridgeContext) {
   const t = String(userText || "").trim();
 
@@ -10312,6 +10366,14 @@ async function handleMessage(msg, contacts) {
           sendReaction(from, messageId, "").catch(() => {});
           return;
         }
+      }
+
+      // === FORM CLARIFICATION: deterministic goreng/frozen answer handler ===
+      // Must run BEFORE LLM classifier — closes the split-brain gap where gate #1/#2
+      // asked goreng/frozen but LLM reply never wrote .form back to draft items.
+      if (await tryHandleFormClarification(from, userText)) {
+        sendReaction(from, messageId, "").catch(() => {});
+        return;
       }
 
       // === LLM-FIRST INTENT CLASSIFIER =================================
