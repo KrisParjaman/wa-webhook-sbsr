@@ -4884,6 +4884,23 @@ async function tryHandleUseCaseRouter(from, userText) {
       const _useNatReply = await generateClassifierReply(from, userText, "choose_option", nextDraft);
       if (_useNatReply && _useNatReply.reply) {
         await sendWhatsAppMessage(from, _useNatReply.reply);
+        // Save reply as pending_order_summary so ya_lanjut can create draft with price
+        const _pd = loadSbsrDraft(from) || nextDraft;
+        saveSbsrDraft(from, { ..._pd, pending_order_summary: _useNatReply.reply, pending_order_at: new Date().toISOString() });
+        log('sbsr-interactive', 'pending_order_summary_saved');
+        // Auto-send lanjut buttons if reply suggests continuing
+        if (/mau\s+langsung\s+pesan|lanjut\s+ke\s+alamat|mau\s+lanjut\s+pesan|sudah\s+betul/i.test(_useNatReply.reply)) {
+          try {
+            await sendWhatsAppInteractiveButtons(from,
+              "Pilih opsi di bawah ya Kak \u{1f90d}",
+              [
+                { type: "reply", reply: { id: "ya_lanjut", title: "Ya, lanjut pesan" } },
+                { type: "reply", reply: { id: "tidak", title: "Tidak dulu" } }
+              ]
+            );
+            log('sbsr-interactive', 'lanjut_buttons_sent_ooc');
+          } catch (_ibErr) { log('sbsr-interactive', 'button_err: ' + (_ibErr && _ibErr.message)); }
+        }
         log("sbsr-usecase", "natural_reply_with_pending_items count=" + _pItems.length);
       } else {
         await sendWhatsAppMessage(from, hit.reply);
@@ -10326,9 +10343,24 @@ async function handleMessage(msg, contacts) {
         let _pendingItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
         const _summary = _bd.pending_order_summary || '';
         if (_pendingItems.length > 0 || _summary) {
-          // Parse price from summary: "totalnya Rp110.000" or "Rp110.000 ya"
-          const _priceM = _summary.match(/Rp\s*([\d.]+)/);
-          const _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
+          // Calculate subtotal: from summary price, or estimate from pending_items
+          let _price = 0;
+          if (_pendingItems.length > 0) {
+            // Estimate: 3pcs=29rb, 6pcs=55rb, 12pcs=105rb (most variants)
+            // Mercon chili oil: 3pcs=33rb, 6pcs=63rb, 12pcs=120rb
+            _price = _pendingItems.reduce((sum, it) => {
+              const qty = Number(it.qty) || 3;
+              const name = String(it.name || "").toLowerCase();
+              const isMercon = /\b(?:mercon|chili|pedas)\b/i.test(name);
+              if (qty <= 3) return sum + (isMercon ? 33000 : 29000); // 3pcs base price (mercon 33rb)
+              if (qty <= 6) return sum + (isMercon ? 63000 : 55000);
+              return sum + (isMercon ? 120000 : 105000);
+            }, 0);
+            log('sbsr-interactive', 'ya_lanjut -> estimated_price=' + _price + ' from pending_items');
+          } else {
+            const _priceM = _summary.match(/Rp\s*([\d.]+)/);
+            _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
+          }
           // Detect pack size — use pending_items if available (more reliable)
           let _pack;
           if (_pendingItems.length > 0) {
