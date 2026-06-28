@@ -1647,7 +1647,6 @@ function parseScriptJSON() { return mapsGeocode ? mapsGeocode.parseScriptJSON.ap
 // Conditions: confidence=low + typed_geocode_failed + same_kecamatan + SBSR_ENABLE_LLM_ADDRESS_MATCH=true
 // Existing validator remains source of truth. Fail-open: any error -> null -> existing behavior.
 // =====================================================
-function maybeSemanticAddressMatch() { return null; }
 
 // =====================================================
 // Semantic Address Match — general-purpose LLM validator for Indonesian addresses.
@@ -1655,7 +1654,6 @@ function maybeSemanticAddressMatch() { return null; }
 // Returns: { match: bool, confidence: "high"|"medium"|"low", reason: string } or null
 // Fail-open: any error → null → caller uses existing deterministic result.
 // =====================================================
-function semanticAddressMatch() { return null; }
 
 function tryHandleAddressAndQuote() { return addressHandler ? addressHandler.tryHandleAddressAndQuote.apply(null, arguments) : null; }
 
@@ -1721,9 +1719,7 @@ function geocodeTypedAddressWithFallback() { return mapsGeocode ? mapsGeocode.ge
 function reverseGeocodeCoordsBridge() { return mapsGeocode ? mapsGeocode.reverseGeocodeCoordsBridge.apply(null, arguments) : null; }
 function resolveLocationDisplayBridge() { return mapsGeocode ? mapsGeocode.resolveLocationDisplayBridge.apply(null, arguments) : null; }
 
-function sendPinConfirmPrompt() { return null; }
 
-function maybeHandleAddressPinDistanceGate() { return null; }
 
 
 // =====================================================
@@ -2267,7 +2263,6 @@ const DEST_CHECK_QUESTION_RE = /\b(cek|liat|lihat)\b[\s\S]{0,20}\b(dikirim|tujua
 const ONGKIR_CHECK_RE = /\b(?:ongkir(?:nya)?|tarif|biaya|kirim(?:an|nya)?)\b/i;
 const ONGKIR_QUESTION_HINT_RE = /\b(berapa|brp|cek|gimana|gmn|brapa)\b|\?\s*$/i;
 
-function runQuoteFor() { return null; }
 
 
 // =====================================================
@@ -2984,7 +2979,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       }
 
       case "place_order": {
-        if (typeof tryHandleFreeTextOrder === "function" && await tryHandleFreeTextOrder(from, userText)) {
+        if (false /* tryHandleFreeTextOrder stubbed */) {
           return true;
         }
         // Detect "lanjut pesan" / "proses" — customer wants to proceed with pending order
@@ -3061,8 +3056,8 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
 
       case "confirm": {
         if (state === "awaiting_invoice_confirm" && await tryHandleInvoiceOk(from, userText)) return true;
-        if (state === "awaiting_order_confirm" && typeof tryHandleOrderConfirm === "function" && await tryHandleOrderConfirm(from, userText)) return true;
-        if (state === "awaiting_meeting_package_confirm" && typeof tryHandleMeetingPackageConfirm === "function" && await tryHandleMeetingPackageConfirm(from, userText)) return true;
+        if (state === "awaiting_order_confirm" && false /* tryHandleOrderConfirm stubbed */) return true;
+        if (state === "awaiting_meeting_package_confirm" && false /* tryHandleMeetingPackageConfirm stubbed */) return true;
         if (state === "awaiting_pin_confirm" && await tryHandlePinConfirm(from, userText)) return true;
         // Confirm in product selection: treat as "lanjut pesan" if pending items exist
         if ((state === "awaiting_product_selection" || state === "awaiting_usecase") && !draft.delivery_mode) {
@@ -3091,13 +3086,13 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       }
 
       case "deny": {
-        if (state === "awaiting_order_confirm" && typeof tryHandleOrderConfirm === "function" && await tryHandleOrderConfirm(from, userText)) return true;
-        if (state === "awaiting_meeting_package_confirm" && typeof tryHandleMeetingPackageConfirm === "function" && await tryHandleMeetingPackageConfirm(from, userText)) return true;
+        if (state === "awaiting_order_confirm" && false /* tryHandleOrderConfirm stubbed */) return true;
+        if (state === "awaiting_meeting_package_confirm" && false /* tryHandleMeetingPackageConfirm stubbed */) return true;
         return false;
       }
 
       case "provide_name": {
-        if (typeof tryHandleNameCapture === "function" && await tryHandleNameCapture(from, userText)) return true;
+        if (false /* tryHandleNameCapture stubbed */) return true;
         const nameRe = /(?:nama|atas\s*nama|saya|aku|gw|gue)\s*:?\s*(.+)/i;
         const m = userText.match(nameRe);
         if (m && m[1].trim().length >= 2) {
@@ -3109,7 +3104,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       }
 
       case "provide_address": {
-        if (typeof tryHandleAddressTextCapture === "function" && await tryHandleAddressTextCapture(from, userText)) return true;
+        if (false /* tryHandleAddressTextCapture stubbed */) return true;
         return false;
       }
 
@@ -3122,8 +3117,8 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       case "choose_option": {
         if (await tryHandleDeliveryMethodSelection(from, userText)) return true;
         if (await tryHandleUseCaseRouter(from, userText)) return true;
-        if (typeof tryHandleFrozenCourierChoice === "function" && await tryHandleFrozenCourierChoice(from, userText)) return true;
-        if (typeof tryHandlePickupFlow === "function" && await tryHandlePickupFlow(from, userText)) return true;
+        if (false /* tryHandleFrozenCourierChoice stubbed */) return true;
+        if (false /* tryHandlePickupFlow stubbed */) return true;
         if (await tryHandleAddressPinConfirm(from, userText)) return true;
         // No handler matched — use natural reply instead of falling to OOC LLM
         const _coReply = await generateClassifierReply(from, userText, "choose_option", draft);
@@ -3136,7 +3131,7 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
       }
 
       case "ask_question": {
-        if (typeof tryHandleFaq === "function" && await tryHandleFaq(from, userText)) return true;
+        if (false /* tryHandleFaq stubbed */) return true;
         // Quick-help: jawab pertanyaan umum langsung tanpa OOC LLM
         // (berguna saat FAQ di-block oleh checkout state)
         const _aq = String(userText || "").trim().toLowerCase();
