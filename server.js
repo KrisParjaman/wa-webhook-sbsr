@@ -6532,67 +6532,62 @@ function _initEngine() {
   _engineInited = true;
 }
 
-async function handleMessage(msg, contacts) {
-  const from = msg.from;
-  const messageId = msg.id;
-  const contactName = contacts?.[0]?.profile?.name || from;
-
-  // #2 — drop duplicate message_ids (Meta webhook retry within 60s) when SBSR_IDEMPOTENT=true
+// ── handleMessage helpers ────────────────────────────────────────────
+async function _guardMessage(from, messageId, msg) {
+  // Dedup
   if (shouldDedupeMessageId(messageId)) {
-    log('idempotent', 'dup message_id within 60s — skip: ' + String(messageId).slice(0, 28) + ' from=' + from);
-    return;
+    log('idempotent', 'dup message_id — skip: ' + String(messageId).slice(0, 28));
+    return false;
   }
-
-  // === BIKS SECURITY: KILLSWITCH ===
-  // SBSR_PAUSE=1 → reply maintenance + escalate to ops, do NOT touch state.
-  // Admin phones bypass the killswitch so /admin commands keep working.
+  // Killswitch
   if (SBSR_PAUSE && !_isAdminPhoneSec(from)) {
     try { await sendWhatsAppMessage(from, SBSR_PAUSE_TEXT); } catch (_) {}
     if (process.env.SBSR_OPS_ESCALATION_PHONE) {
       const _sample = (msg.text && msg.text.body) || "[non-text " + msg.type + "]";
       sendWhatsAppMessage(process.env.SBSR_OPS_ESCALATION_PHONE, "[PAUSE] " + from + ": " + String(_sample).slice(0, 200)).catch(() => {});
     }
-    return;
+    return false;
   }
-  // === BIKS SECURITY: RATE-LIMIT (per-phone msg) ===
+  // Rate limit
   if (secLib && !_isAdminPhoneSec(from)) {
     try {
       const _rl = await secLib.rateLimiter.take(from, "msg");
       if (!_rl.ok) {
         const _min = Math.max(1, Math.ceil((_rl.retryAfterSec || 60) / 60));
         await sendWhatsAppMessage(from, "Pesannya kebanyakan ya Kak 🙏 Mintu balas pelan-pelan — coba lagi dalam ~" + _min + " menit");
-        return;
+        return false;
       }
     } catch (e) { console.error("[security] rate-limit err (fail-open):", e.message); }
   }
-  // === END BIKS SECURITY ===
-
-  // Stamp inbound timestamp for #3 24h-WA-window tracking. Always merges with
-  // existing draft so concurrent saves elsewhere preserve other fields.
+  // Stamp draft
   try {
     const _d = loadSbsrDraft(from) || { phone: from };
     saveSbsrDraft(from, { ..._d, last_inbound_at: new Date().toISOString() });
   } catch (_) {}
+  return true;
+}
 
-  // Notify admin on new incoming message (once per 30 min per customer, non-admin only)
-  if (!_isAdminPhoneSec(from)) {
-    const _now = Date.now();
-    const _lastNotif = _adminNotifLastSent.get(from) || 0;
-    if (_now - _lastNotif > 30 * 60 * 1000) {
-      _adminNotifLastSent.set(from, _now);
-      const _fins = getSbsrFinancePhones();
-      const _name = contacts?.[0]?.profile?.name || "";
-      const _label = _name ? _name + " (+" + from + ")" : "+" + from;
-      const _notifText =
-        "🔔 *Pesan Baru Masuk*\n" +
-        "Dari: " + _label + "\n\n" +
-        "Segera cek panel admin:\n" +
-        "https://production.biks.ai/admin";
-      for (const _fin of _fins) {
-        sendWhatsAppMessage(_fin, _notifText).catch(() => {});
-      }
+function _notifyAdminOnMessage(from, contacts) {
+  if (_isAdminPhoneSec(from)) return;
+  const _now = Date.now();
+  const _lastNotif = _adminNotifLastSent.get(from) || 0;
+  if (_now - _lastNotif > 30 * 60 * 1000) {
+    _adminNotifLastSent.set(from, _now);
+    const _name = contacts?.[0]?.profile?.name || "";
+    const _label = _name ? _name + " (+" + from + ")" : "+" + from;
+    for (const _fin of getSbsrFinancePhones()) {
+      sendWhatsAppMessage(_fin, "🔔 *Pesan Baru Masuk*\nDari: " + _label + "\n\nSegera cek panel admin:\nhttps://production.biks.ai/admin").catch(() => {});
     }
   }
+}
+
+async function handleMessage(msg, contacts) {
+  const from = msg.from;
+  const messageId = msg.id;
+  const contactName = contacts?.[0]?.profile?.name || from;
+
+  if (!await _guardMessage(from, messageId, msg)) return;
+  _notifyAdminOnMessage(from, contacts);
 
   try {
     markAsRead(messageId).catch(() => {});
