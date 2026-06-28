@@ -6299,18 +6299,9 @@ async function tryHandleAddressTextCapture(from, userText) {
   let latestDraft = loadSbsrDraft(from) || nextDraft;
   if ((!Array.isArray(latestDraft.items) || latestDraft.items.length === 0) &&
       Array.isArray(latestDraft.pending_items) && latestDraft.pending_items.length > 0) {
-    const _pit = latestDraft.pending_items;
     const _form = String(latestDraft.use_case || "").includes("frozen") ? "frozen" : "goreng";
-    const _totalPcs = _pit.reduce((s, it) => s + (Number(it.qty) || 1), 0);
-    const _subtotal = _pit.reduce((sum, it) => {
-      const q = Number(it.qty) || 3;
-      const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name || ""));
-      if (q <= 3) return sum + (isM ? 33000 : 29000);
-      if (q <= 6) return sum + (isM ? 63000 : 55000);
-      return sum + (isM ? 120000 : 105000);
-    }, 0);
-    const _name = "Risol " + (_form === "frozen" ? "Frozen" : "Goreng") + " — Mix " + _totalPcs + "pcs";
-    latestDraft = { ...latestDraft, items: [{ name: _name, qty: 1, pack_size: _totalPcs, unit_price: _subtotal, form: _form }], subtotal: _subtotal, pending_items: null };
+    const _built = buildItemsFromPending(latestDraft.pending_items, _form);
+    latestDraft = { ...latestDraft, items: _built.items, subtotal: _built.subtotal, pending_items: null };
     saveSbsrDraft(from, latestDraft);
     log("sbsr-addr-text", "converted pending_items to items subtotal=" + _subtotal + " pack=" + _totalPcs);
   }
@@ -7395,6 +7386,28 @@ async function sendWelcomeWithCatalog(from) {
   } catch (e) {
     log("welcome", "catalog_image_failed: " + e.message);
   }
+}
+
+// Build individual items from pending_items (classifier extraction).
+// Returns { items, subtotal, pack } with per-product detail.
+function buildItemsFromPending(pendingItems, form) {
+  const _form = form || "goreng";
+  const items = [];
+  let subtotal = 0;
+  let totalPcs = 0;
+  for (const pi of pendingItems) {
+    const qty = Number(pi.qty) || 1;
+    const name = String(pi.name || "Risol").trim();
+    const isM = /\b(?:mercon|chili|pedas)\b/i.test(name);
+    let price;
+    if (qty <= 3) price = isM ? 33000 : 29000;
+    else if (qty <= 6) price = isM ? 63000 : 55000;
+    else price = isM ? 120000 : 105000;
+    items.push({ name, qty, pack_size: qty, unit_price: price, form: _form });
+    subtotal += price;
+    totalPcs += qty;
+  }
+  return { items, subtotal, pack: totalPcs };
 }
 const SBSR_TRANSIENT_RESET_STATES = new Set([
   "awaiting_name",
@@ -9473,26 +9486,18 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
           const _pendItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
           const _summary = _bd.pending_order_summary || "";
           if (_pendItems.length > 0 || _summary) {
-            // Simulate ya_lanjut: create items, send delivery buttons
-            let _price = 0;
+            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
+            let _built;
             if (_pendItems.length > 0) {
-              _price = _pendItems.reduce((sum, it) => {
-                const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
-                if (q <= 3) return sum + (isM ? 33000 : 29000);
-                if (q <= 6) return sum + (isM ? 63000 : 55000);
-                return sum + (isM ? 120000 : 105000);
-              }, 0);
+              _built = buildItemsFromPending(_pendItems, _form);
             } else {
               const _pm = _summary.match(/Rp\s*([\d.]+)/);
-              _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+              const _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+              const _pack = 6;
+              _built = { items: [{name:"Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs", qty:1, pack_size:_pack, unit_price:_price, form:_form}], subtotal:_price, pack:_pack };
             }
-            const _pack = _pendItems.length > 0
-              ? _pendItems.reduce((s,it) => s + (Number(it.qty)||1), 0)
-              : 6;
-            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
-            const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
-            saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_order_summary:null, pending_items:null, state:"awaiting_delivery_method" });
-            log("llm-classifier", "proceed_detected → awaiting_delivery_method price=" + _price + " pack=" + _pack);
+            saveSbsrDraft(from, { ..._bd, items: _built.items, subtotal: _built.subtotal, pending_order_summary:null, pending_items:null, state:"awaiting_delivery_method" });
+            log("llm-classifier", "proceed_detected → delivery_method items=" + _built.items.length + " subtotal=" + _built.subtotal);
             await sendSbsrDeliveryMethodButtons(from);
             sendReaction(from, messageId, "").catch(() => {});
             return true;
@@ -9558,22 +9563,17 @@ async function routeClassifiedIntent(from, userText, intent, messageId) {
           const _summary = _bd.pending_order_summary || "";
           if (_pendItems.length > 0 || _summary) {
             let _price = 0;
+            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
+            let _built;
             if (_pendItems.length > 0) {
-              _price = _pendItems.reduce((sum, it) => {
-                const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
-                if (q <= 3) return sum + (isM ? 33000 : 29000);
-                if (q <= 6) return sum + (isM ? 63000 : 55000);
-                return sum + (isM ? 120000 : 105000);
-              }, 0);
+              _built = buildItemsFromPending(_pendItems, _form);
             } else {
               const _pm = _summary.match(/Rp\s*([\d.]+)/);
-              _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+              const _price = _pm ? parseInt(_pm[1].replace(/\./g,""),10) : 0;
+              _built = { items: [{name:"Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix 6pcs", qty:1, pack_size:6, unit_price:_price, form:_form}], subtotal:_price, pack:6 };
             }
-            const _pack = _pendItems.length > 0 ? _pendItems.reduce((s,it) => s+(Number(it.qty)||1),0) : 6;
-            const _form = String(_bd.use_case || "").includes("frozen") ? "frozen" : "goreng";
-            const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
-            saveSbsrDraft(from, { ..._bd, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_items:null, pending_order_summary:null, state:"awaiting_delivery_method" });
-            log("llm-classifier", "confirm→lanjut price=" + _price + " pack=" + _pack);
+            saveSbsrDraft(from, { ..._bd, items: _built.items, subtotal: _built.subtotal, pending_items:null, pending_order_summary:null, state:"awaiting_delivery_method" });
+            log("llm-classifier", "confirm→lanjut items=" + _built.items.length + " subtotal=" + _built.subtotal);
             await sendSbsrDeliveryMethodButtons(from);
             sendReaction(from, messageId, "").catch(() => {});
             return true;
@@ -10425,56 +10425,26 @@ async function handleMessage(msg, contacts) {
         let _pendingItems = Array.isArray(_bd.pending_items) ? _bd.pending_items : [];
         const _summary = _bd.pending_order_summary || '';
         if (_pendingItems.length > 0 || _summary) {
-          // Calculate subtotal: from summary price, or estimate from pending_items
-          let _price = 0;
+          const _form = String(_bd.use_case || "").includes("frozen") ? 'frozen' : 'goreng';
+          let _built;
           if (_pendingItems.length > 0) {
-            // Estimate: 3pcs=29rb, 6pcs=55rb, 12pcs=105rb (most variants)
-            // Mercon chili oil: 3pcs=33rb, 6pcs=63rb, 12pcs=120rb
-            _price = _pendingItems.reduce((sum, it) => {
-              const qty = Number(it.qty) || 3;
-              const name = String(it.name || "").toLowerCase();
-              const isMercon = /\b(?:mercon|chili|pedas)\b/i.test(name);
-              if (qty <= 3) return sum + (isMercon ? 33000 : 29000); // 3pcs base price (mercon 33rb)
-              if (qty <= 6) return sum + (isMercon ? 63000 : 55000);
-              return sum + (isMercon ? 120000 : 105000);
-            }, 0);
-            log('sbsr-interactive', 'ya_lanjut -> estimated_price=' + _price + ' from pending_items');
+            _built = buildItemsFromPending(_pendingItems, _form);
+            log('sbsr-interactive', 'ya_lanjut -> ' + _built.items.length + ' items subtotal=' + _built.subtotal + ' from pending_items');
           } else {
             const _priceM = _summary.match(/Rp\s*([\d.]+)/);
-            _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
-          }
-          // Detect pack size — use pending_items if available (more reliable)
-          let _pack;
-          if (_pendingItems.length > 0) {
-            _pack = _pendingItems.reduce((sum, it) => sum + (Number(it.qty) || 1), 0);
-            log('sbsr-interactive', 'ya_lanjut -> using pending_items total_pcs=' + _pack);
-          } else {
-            // Fallback: count pcs from summary (only up to first "Harga"/price line)
+            const _price = _priceM ? parseInt(_priceM[1].replace(/\./g, ''), 10) : 0;
             const _summaryHead = _summary.split(/\b(?:Harga|price|list|Rp\s*\d)/i)[0];
             const _mixM = _summaryHead.match(/Mix\s+(\d+)\s*pcs/i);
-            if (_mixM) {
-              _pack = parseInt(_mixM[1], 10);
-            } else {
-              const _pcsRe = /(\d+)\s*pcs/gi;
-              let _total = 0, _m;
-              while ((_m = _pcsRe.exec(_summaryHead)) !== null) {
-                _total += parseInt(_m[1], 10);
-              }
-              _pack = _total > 0 ? _total : 6;
+            let _pack = 6;
+            if (_mixM) { _pack = parseInt(_mixM[1], 10); } else {
+              const _pcsRe = /(\d+)\s*pcs/gi; let _t = 0, _m;
+              while ((_m = _pcsRe.exec(_summaryHead)) !== null) _t += parseInt(_m[1], 10);
+              _pack = _t > 0 ? _t : 6;
             }
+            _built = { items: [{name:'Risol ' + (_form==='frozen'?'Frozen':'Goreng') + ' — Mix '+_pack+'pcs', qty:1, pack_size:_pack, unit_price:_price, form:_form}], subtotal:_price, pack:_pack };
           }
-          // Determine form — use use_case (set by tryHandleUseCaseRouter), not summary text
-          const _form = String(_bd.use_case || "").includes("frozen") ? 'frozen' : 'goreng';
-          const _name = 'Risol ' + (_form === 'frozen' ? 'Frozen' : 'Goreng') + ' — Mix ' + _pack + 'pcs';
-          saveSbsrDraft(from, {
-            ..._bd,
-            items: [{ name: _name, qty: 1, pack_size: _pack, unit_price: _price, form: _form }],
-            subtotal: _price,
-            pending_order_summary: null,
-            pending_items: null,
-            state: 'awaiting_delivery_method',
-          });
-          log('sbsr-interactive', 'ya_lanjut -> created draft price=' + _price + ' pack=' + _pack + ( _pendingItems.length > 0 ? ' (from pending_items)' : ' (from summary)'));
+          saveSbsrDraft(from, { ..._bd, items: _built.items, subtotal: _built.subtotal, pending_order_summary:null, pending_items:null, state:'awaiting_delivery_method' });
+          log('sbsr-interactive', 'ya_lanjut -> created draft items=' + _built.items.length + ' subtotal=' + _built.subtotal);
           await sendSbsrDeliveryMethodButtons(from);
           sendReaction(from, messageId, '').catch(() => {});
           return;
@@ -10541,18 +10511,10 @@ async function handleMessage(msg, contacts) {
         // If only pending_items (natural reply flow), create real items first
         let _updDraft = _routerDraft;
         if (!_hasItems && _hasPendingItems) {
-          const _pit = _routerDraft.pending_items;
           const _form = String(_routerDraft.use_case || "").includes("frozen") ? "frozen" : "goreng";
-          const _pack = _pit.reduce((s,it) => s + (Number(it.qty)||1), 0);
-          const _price = _pit.reduce((sum, it) => {
-            const q = Number(it.qty) || 3; const isM = /\b(?:mercon|chili|pedas)\b/i.test(String(it.name||""));
-            if (q <= 3) return sum + (isM ? 33000 : 29000);
-            if (q <= 6) return sum + (isM ? 63000 : 55000);
-            return sum + (isM ? 120000 : 105000);
-          }, 0);
-          const _name = "Risol " + (_form==="frozen"?"Frozen":"Goreng") + " — Mix " + _pack + "pcs";
-          _updDraft = { ..._routerDraft, items: [{name:_name,qty:1,pack_size:_pack,unit_price:_price,form:_form}], subtotal:_price, pending_items:null, pending_order_summary:null };
-          log("sbsr-lanjut", "created_items_from_pending pack=" + _pack + " price=" + _price);
+          const _built = buildItemsFromPending(_routerDraft.pending_items, _form);
+          _updDraft = { ..._routerDraft, items: _built.items, subtotal: _built.subtotal, pending_items:null, pending_order_summary:null };
+          log("sbsr-lanjut", "created_items_from_pending count=" + _built.items.length + " subtotal=" + _built.subtotal);
         }
         saveSbsrDraft(from, { ..._updDraft, state: "awaiting_delivery_method" });
         await sendSbsrDeliveryMethodButtons(from);
