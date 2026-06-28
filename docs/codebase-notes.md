@@ -1,6 +1,6 @@
 # Codebase Notes — wa-webhook-sbsr
 
-> Terakhir diupdate: 2026-06-28
+> Terakhir diupdate: 2026-06-28 (dedup fix + PostgreSQL catalog/conversations)
 
 ## Arsitektur Umum
 
@@ -59,39 +59,49 @@ Semua lib di-require di `server.js` dalam blok `try { secLib = {...} }` — jika
 
 ### Env Vars Penting
 
-| Var | Keterangan |
-|---|---|
-| `WA_CATALOG_ID` | ID katalog WA Business (hardcoded fallback: `1477386560782761`) |
-| `SBSR_FINANCE_PHONES` | Nomor admin yang menerima notif (comma-separated) |
-| `SBSR_KITCHEN_PHONES` | Nomor dapur (bypass rate limit & killswitch) |
-| `SBSR_PAUSE` | `1` = mode maintenance, semua pesan dibalas teks maintenance |
-| `SBSR_OPS_ESCALATION_PHONE` | Nomor ops untuk escalation saat PAUSE mode |
-| `SBSR_DAILY_LLM_CAP_USD` | Batas biaya LLM harian (default $5) |
+| Var | Default | Keterangan |
+|---|---|---|
+| `WA_CATALOG_ID` | `1477386560782761` | ID katalog WA Business |
+| `SBSR_FINANCE_PHONES` | — | Nomor admin yang menerima notif (comma-separated) |
+| `SBSR_KITCHEN_PHONES` | — | Nomor dapur (bypass rate limit & killswitch) |
+| `SBSR_PAUSE` | — | `1` = mode maintenance, semua pesan dibalas teks maintenance |
+| `SBSR_OPS_ESCALATION_PHONE` | — | Nomor ops untuk escalation saat PAUSE mode |
+| `SBSR_DAILY_LLM_CAP_USD` | `5` | Batas biaya LLM harian (USD) |
+| `SBSR_IDEMPOTENT` | **ON** | Webhook dedup. Set `false` untuk disable (tidak disarankan) |
+| `POSTGRES_URL` | — | Connection string PostgreSQL (`postgresql://sbsr:...@127.0.0.1:5432/sbsr`) |
+| `WA_MSG_RETENTION_DAYS` | `90` | Berapa hari pesan disimpan di `wa_messages` sebelum dihapus |
+| `WA_MSG_MAX_PER_PHONE` | `500` | Maks pesan tersimpan per nomor di PostgreSQL |
 
 ---
 
 ## Katalog Produk — Alur Data
 
+> **Setelah branch `feat/postgres-catalog`:** sumber data utama pindah ke PostgreSQL.
+> `catalog-map.json` dan `products.json` tidak lagi dibaca oleh `server.js` (tetap ada sebagai referensi historis).
+> Lihat detail di [`docs/postgres-catalog.md`](postgres-catalog.md).
+
 ```
-WA Business Catalog API (live, sync tiap 5 menit)
+PostgreSQL: catalog_products (warmup saat startup)
    catalogMap      → SKU → nama produk
    catalogPrices   → SKU → harga (Rp)
    catalogAvailability → SKU → stok status
          │
          ▼
-   formatCatalogForLLM()   — konteks LLM, harga live
+WA Business Catalog API (sync tiap 5 menit)
+   → Update in-memory catalogMap/catalogPrices/catalogAvailability
+   → UPSERT balik ke catalog_products
+         │
+         ▼
+   formatCatalogForLLM()    — konteks LLM, harga live
    formatSbsrFullMenuText() — teks menu ke customer
+
+PostgreSQL: store_config (warmup saat startup)
+   key=store_info  → nama toko, lokasi, kurir, addons
+   key=categories  → daftar kategori + variants
+   key=faq         → FAQ Mintu
          │
-   products.json (FALLBACK jika WA API gagal)
-         │   digunakan untuk:
-         │   - p.store.kurir, p.store.location (metadata toko)
-         │   - p.faq (FAQ)
-         │   - variants/prices jika catalogPrices kosong
-         │
-   catalog-map.json (STATIC, selalu loaded)
-         │   digunakan untuk:
-         │   - SKU → nama saat WA API belum sync
-         │   - Order parsing fallback
+         ▼
+   loadProductCatalog()  — return _productCatalogCache dari PG
 ```
 
 ### SKU Scheme (catalog-map.json)
@@ -193,6 +203,27 @@ Notif ke admin via `SBSR_FINANCE_PHONES` terpicu pada:
 
 ---
 
+## Webhook Dedup (Idempotency)
+
+**Aktif secara default.** Meta WA Cloud API bersifat at-least-once delivery — jika bridge tidak ACK dalam ~5 detik, Meta retry dengan `message_id` yang sama. Tanpa dedup, `handleMessage()` dipanggil dua kali → customer menerima reply duplikat.
+
+### Mekanisme
+
+`shouldDedupeMessageId(messageId)` di `server.js` menyimpan `message_id` yang sudah diproses dalam in-memory `Map` dengan TTL 60 detik. Jika `message_id` yang sama datang lagi dalam window tersebut, pesan langsung di-drop.
+
+```js
+// Dedup ON secara default — set SBSR_IDEMPOTENT=false untuk disable
+if (process.env.SBSR_IDEMPOTENT === 'false') return false;
+```
+
+### Catatan Penting
+
+- Dedup berbasis **in-memory** — restart server mengosongkan Map. Ini aman karena TTL Meta retry < 60 detik dan restart bridge biasanya < 5 detik.
+- Dedup hanya efektif jika **hanya satu instance** bridge yang terhubung ke nomor WA. Jika ada dua instance (production + testing) pointing ke nomor yang sama, setiap pesan tetap diproses dua kali dari dua proses berbeda.
+- Untuk disable sementara (debugging): set `SBSR_IDEMPOTENT=false` di `.env` + restart.
+
+---
+
 ## Patch Files (SUDAH DIHAPUS)
 
 File berikut sudah **dihapus** karena one-time migration scripts yang sudah ter-apply ke `server.js`:
@@ -215,3 +246,6 @@ File berikut sudah **dihapus** karena one-time migration scripts yang sudah ter-
 | 2026-06 | Video reset saat diputar | `setInterval` rebuild DOM tiap 5s — skip jika video playing atau no new msgs |
 | 2026-06 | Location button tidak muncul setelah terima alamat | `sendSbsrLocationPromptMessage` gate pada state — bypass langsung `sendWhatsAppLocationRequest` |
 | 2026-06 | "ok/oke" trigger restart session | Hapus ok/oke dari `SBSR_RESTART_INTENT_RE` |
+| 2026-06 | Customer terima reply duplikat 2-3x | `SBSR_IDEMPOTENT` default OFF — diinvert jadi default ON; dedup aktif tanpa perlu set env var |
+| 2026-06 | Catalog & store config baca dari file | Migrasi ke PostgreSQL (`catalog_products`, `store_config`) — lihat `docs/postgres-catalog.md` |
+| 2026-06 | Conversation history hanya di file JSON | Dual-write ke `wa_messages` PostgreSQL + autodelete policy — lihat `docs/postgres-conversations.md` |
