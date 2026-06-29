@@ -3147,6 +3147,24 @@ function _initEngine() {
         });
       },
       sendButtons: sendWhatsAppInteractiveButtons,
+      sendLocationRequest: sendWhatsAppLocationRequest,
+      sendCatalogImage: function(to, caption) {
+        var imgPath = process.env.SBSR_CATALOG_IMAGE_PATH || '/docker/wa-webhook-sbsr/static/catalog-image.jpeg';
+        try {
+          if (!require('fs').existsSync(imgPath)) { log('catalog-img', 'file missing: ' + imgPath); return Promise.resolve(false); }
+          return uploadMediaToWhatsApp(imgPath, 'image/jpeg').then(function(mediaId) {
+            return sendWhatsAppImage(to, mediaId, caption || 'Menu Sentuh Rasa 🤍');
+          }).catch(function(e) { log('catalog-img', 'send failed: ' + e.message); });
+        } catch(e) { log('catalog-img', 'err: ' + e.message); return Promise.resolve(false); }
+      },
+      resolveGmapsUrl: function(rawText) {
+        // Extract maps URL from user text, then resolve to {lat,lng}
+        if (!mapsGeocode) return null;
+        var MAPS_URL_RE = /(https?:\/\/(?:[a-z0-9.-]*\.)?(?:maps\.app\.goo\.gl|goo\.gl\/maps|maps\.google\.com|google\.com\/maps)\/?[^\s)]*)/i;
+        var m = (rawText || '').match(MAPS_URL_RE);
+        if (!m) return null;
+        return mapsGeocode.resolveGmapsUrlBridge(m[1]);
+      },
       notifyAdmin: notifySbsrAdminsText,
       log: log,
       sanitizeUserText: secLib ? secLib.sanitizeUserText : null,

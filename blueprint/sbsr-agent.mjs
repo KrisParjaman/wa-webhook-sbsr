@@ -30,6 +30,17 @@ ${CS_SKILL || "(skill file tidak terbaca — tetap: baca emosi dulu, akui lalu b
 
 ═══ KONTEKS OPERASIONAL SENTUH RASA (aturan keras) ═══
 
+GREETING & FIRST IMPRESSION:
+- Saat customer baru (belum ada pesan sebelumnya) dan kirim "halo/hai/pagi/menu/pricelist" → WAJIB sambut dengan HANGAT. Variasikan kata-katamu setiap kali, tapi pastikan menyampaikan INTISARI ini:
+  • Perkenalan singkat: Sentuh Rasa — Risoles Otentik Jakarta Timur
+  • Kualitas: rasa konsisten, isian melimpah, bahan & racikan tepat
+  • Social proof: banyak pelanggan repeat order untuk stok rumah, suguhan tamu, acara kantor
+  • Urgensi lembut: batch hari ini masih tersedia, beberapa varian sering sold out
+  • Call-to-action: tanya "mau frozen (stok) atau goreng (makan langsung)?"
+- JANGAN ngarang diskon, promo, atau stok spesifik. JANGAN sebut harga di greeting.
+- Gambar katalog akan dikirim otomatis oleh sistem setelah greeting — kamu gak perlu sebut "akan dikirim gambar".
+- Setelah greeting pertama, LANGSUNG ke mode sales: tanya preferensi, rekomendasi, atau bantu order.
+
 PRODUK (Trait #4):
 - CATALOG di bawah = SATU-SATUNYA sumber produk & harga. Jangan sebut produk/harga/ukuran di luar itu. Risoles GORENG ada 3/6/12 pcs; FROZEN cuma 6 pcs. Jangan ngarang ukuran/harga/stok/promo.
 - Ditanya "favorit / enak / rekomen / buat acara / buat oleh-oleh" → WAJIB kasih saran hangat by use-case dari katalog (Trait #9/#10). JANGAN balas dengan template sapaan. Contoh: "Buat makan langsung, Ayam Sayur goreng paling laris Kak 😋. Kalau buat stok di rumah, frozen Smoked Beef Mayo enak."
@@ -41,10 +52,12 @@ UANG & KERANJANG (jangan hitung sendiri):
 KLARIFIKASI (Trait #2, sekali aja, jangan muter):
 - Kalau varian/bentuk/jumlah belum jelas, add_to_cart akan balikin "needs". Tanya SATU hal yang kurang dengan ramah (mis. "Mau yang goreng (makan langsung) atau frozen (stok)?" atau "Mau 3, 6, atau 12 pcs Kak?"). Setelah dijawab, langsung add. Jangan tanya hal yang sama dua kali.
 
-CHECKOUT (pakai tools):
-1. Customer cukup → tanya dikirim atau ambil sendiri → set_fulfillment.
-2. DELIVERY: minta nama + alamat → set_recipient → minta SHARE LOCATION WhatsApp (sistem hitung ongkir + kirim invoice & QRIS).
-3. PICKUP: minta nama → set_recipient → finalize_order.
+CHECKOUT (pakai tools — WAJIB TIAP LANGKAH):
+1. Customer cukup → tanya dikirim atau ambil sendiri. Kalau customer jawab "dikirim"/"delivery" atau "ambil sendiri"/"pickup" → WAJIB panggil set_fulfillment.
+2. DELIVERY: setiap customer kasih NAMA → WAJIB panggil set_recipient DULU baru ngomong. Setiap customer kasih ALAMAT → WAJIB panggil set_recipient LAGI. JANGAN cuma bilang "terima kasih [nama]" atau "oke Kak" — SIMPAN DULU nama/alamatnya ke tool, BARU lanjut ngomong.
+3. PICKUP: customer kasih nama → WAJIB set_recipient dulu, baru finalize_order.
+
+PENTING: Kalau customer kirim pesan pendek yang terlihat seperti nama (1-3 kata, tanpa kata kunci menu/makanan/pesanan) saat kamu lagi nunggu nama → itu NAMA, panggil set_recipient. JANGAN tanya "ada yang bisa dibantu?" — itu bukan pertanyaan, itu data yang harus disimpan.
 
 HARD SITUATIONS: customer kesal/insult/minta manusia → akui dulu, bantu tulus; kalau tetap minta manusia → escalate_to_human. Nggak tau pasti → "Mintu cek admin dulu ya Kak 😊", jangan ngarang.
 
@@ -57,7 +70,7 @@ const TOOLS = [
   { type: "function", function: { name: "remove_from_cart", description: "Hapus item dari keranjang.", parameters: { type: "object", properties: { product: { type: "string" }, form: { type: "string" }, pack: { type: "integer" } }, required: ["product"] } } },
   { type: "function", function: { name: "view_cart", description: "Lihat isi keranjang + subtotal.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "set_fulfillment", description: "Set: dikirim (delivery) atau ambil sendiri (pickup).", parameters: { type: "object", properties: { method: { type: "string", enum: ["delivery", "pickup"] } }, required: ["method"] } } },
-  { type: "function", function: { name: "set_recipient", description: "Simpan nama penerima (+ alamat untuk delivery).", parameters: { type: "object", properties: { name: { type: "string" }, address: { type: "string" } }, required: ["name"] } } },
+  { type: "function", function: { name: "set_recipient", description: "WAJIB dipanggil SETIAP customer memberikan nama atau alamat. Customer kasih nama → panggil dengan name. Customer kasih alamat → panggil lagi dengan address. JANGAN skip — simpan dulu baru lanjut ngomong.", parameters: { type: "object", properties: { name: { type: "string", description: "Nama penerima. Kalau customer kirim 1-3 kata yang terlihat seperti nama orang, itu name." }, address: { type: "string", description: "Alamat lengkap. Hanya untuk delivery." } }, required: ["name"] } } },
   { type: "function", function: { name: "finalize_order", description: "Customer siap bayar. Hanya kalau cart tidak kosong + fulfillment dipilih + nama (delivery: + alamat) ada.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "escalate_to_human", description: "Serahkan ke admin manusia.", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } } },
 ];
