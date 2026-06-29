@@ -1406,7 +1406,7 @@ function formatOCRForBot(){return ocrUtils?ocrUtils.formatForBot.apply(null,argu
 // --- Process incoming message ---
 
 // =====================================================
-// #2 Bridge-level inbound dedup — gated by SBSR_IDEMPOTENT=true (default OFF)
+// #2 Bridge-level inbound dedup — ON by default (set SBSR_IDEMPOTENT=false to disable)
 // =====================================================
 // Catches Meta webhook retries: when bridge takes >5s to ACK, Meta resends the
 // same message_id; without dedup, handleMessage would fire twice and any
@@ -3015,6 +3015,7 @@ function _initEngine() {
   if (_engineInited || !engineCtx) return;
   engineCtx.init({
     SBSR_DRAFTS_DIR,
+    pgPool,
     sendWhatsAppMessage,
     sendWhatsAppCatalog,
     sendWhatsAppLocationRequest,
@@ -3043,6 +3044,31 @@ function _initEngine() {
     pgPool: pgPool,
     log: log,
   });
+  // Reload catalog-pg price cache from Postgres
+  if (pgPool) {
+    try { require('./lib/catalog-pg.cjs').reload(pgPool).catch(function(e){ log('catalog-pg','reload failed: '+e.message); }); } catch(_) {}
+  }
+  // Preload drafts from Postgres into local files (restart recovery, B2)
+  if (pgPool) {
+    pgPool.query("SELECT phone, draft, updated_at FROM wa_drafts WHERE tenant='sbsr' AND updated_at > NOW() - INTERVAL '7 days'")
+      .then(function(res) {
+        var fs2 = require('fs');
+        res.rows.forEach(function(r) {
+          try {
+            var p = SBSR_DRAFTS_DIR + '/' + String(r.phone).replace(/[^0-9]/g,'') + '.json';
+            if (!fs2.existsSync(p)) {
+              fs2.mkdirSync(SBSR_DRAFTS_DIR, { recursive: true });
+              fs2.writeFileSync(p, JSON.stringify({ ...r.draft, updated_at: r.updated_at }, null, 2));
+            }
+          } catch(_) {}
+        });
+        log('drafts-preload', 'synced ' + res.rows.length + ' drafts from Postgres');
+      })
+      .catch(function(e) { log('drafts-preload', 'failed: ' + e.message); });
+    // Clean up expired sessions from Postgres
+    pgPool.query("DELETE FROM wa_drafts WHERE tenant='sbsr' AND updated_at < NOW() - INTERVAL '24 hours' AND (draft->>'state' IS NULL OR draft->>'state' NOT IN ('awaiting_proof','pending_finance','approved','booked','delivered'))")
+      .catch(function(e) { log('drafts-expire', 'cleanup failed: ' + e.message); });
+  }
   // Warm catalog from PostgreSQL, then start Meta API sync
   if (catalogManager && pgPool) {
     catalogManager.warmStoreConfig().catch(function(e) { console.error("[store-config] startup load failed:", e.message); });
