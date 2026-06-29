@@ -126,7 +126,9 @@ async function callLLM(messages) {
 
 export async function runAgent(state, userText) {
   const order = state.order || { cart: [] };
-  const messages = state.messages && state.messages.length ? state.messages : [{ role: "system", content: SYSTEM_PROMPT }];
+  let messages = state.messages && state.messages.length && state.messages[0]?.role === "system"
+    ? state.messages
+    : [{ role: "system", content: SYSTEM_PROMPT }, ...(state.messages || [])];
   if (userText) messages.push({ role: "user", content: userText });
   if (!DS_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
   for (let i = 0; i < 5; i++) {
