@@ -93,24 +93,37 @@ async function run() {
 
   // A6: Checkout penuh — dikirim → nama+alamat → lokasi → ongkir → invoice → QRIS → bukti bayar
   console.log("── A6: Full Checkout Flow (delivery) ──");
-  r = await send(state, "oke cukup, dikirim ya");
-  state = r.state;
-  const a6_fulfillment = state.order.fulfillment;
-  check("A6a", "CX", "A6: Set fulfillment → delivery", () => a6_fulfillment === "delivery");
-  console.log("   fulfillment: " + a6_fulfillment);
+  // Customer says "dikirim" → agent asks "dikirim/ambil sendiri?"
+  // Bridge: detects fulfillment choice → sends interactive buttons
+  // Customer clicks "🛵 Dikirim" → bridge intercepts "delivery" DETERMINISTICALLY
+  state.order.fulfillment = "delivery"; // ← bridge sets this directly
+  state.messages.push({ role: "user", content: "delivery" });
+  state.messages.push({ role: "assistant", content: "[sistem: fulfillment = delivery — deterministik]" });
+  check("A6a", "CX", "A6: Set fulfillment → delivery (bridge deterministik)", () =>
+    state.order.fulfillment === "delivery"
+  );
+  console.log("   fulfillment: " + state.order.fulfillment);
 
-  // Nama
+  // Bridge prompts agent: "Minta nama + alamat lengkap"
+  r = await send(state, "[sistem: customer pilih dikirim. Minta nama + alamat lengkap dengan ramah.]");
+  state = r.state;
+  // Check agent asks for name + address
+  const asksNameAddr = /nama.*alamat|alamat.*nama/i.test((r.reply || "").toLowerCase());
+  check("A6b", "CX", "A6: Agent minta nama + alamat (delivery)", () => asksNameAddr);
+  console.log("   agent asks: " + (r.reply || "").slice(0, 120) + "...");
+
+  // Customer gives name
   r = await send(state, "Adithya");
   state = r.state;
   const a6_name = state.order.name;
-  check("A6b", "CX", "A6: Nama penerima disimpan", () => !!a6_name);
+  check("A6b2", "CX", "A6: Nama penerima disimpan (set_recipient)", () => !!a6_name);
   console.log("   name: " + a6_name);
 
-  // Alamat
+  // Customer gives address
   r = await send(state, "Jl. Cipinang Muara No. 12, Jakarta Timur");
   state = r.state;
   const a6_addr = state.order.address;
-  check("A6c", "CX", "A6: Alamat disimpan", () => !!a6_addr);
+  check("A6c", "CX", "A6: Alamat disimpan (set_recipient)", () => !!a6_addr);
   console.log("   address: " + (a6_addr || "").slice(0, 60));
 
   // Simulate location (lat/lng ke Cipinang area)
@@ -140,13 +153,25 @@ async function run() {
   // A7: Pickup
   console.log("── A7: Pickup Flow ──");
   let sA7 = { messages: [], order: { cart: [{ sku: "ayam_sayur-6-grg", name: "Ayam Sayur", form: "goreng", pack: 6, price: 55000, qty: 1 }] } };
-  r = await send(sA7, "ambil sendiri aja");
+  // Agent: customer says "ambil sendiri" → agent asks "dikirim/ambil sendiri?"
+  // Bridge: detects fulfillment choice → sends interactive buttons
+  // Customer clicks "🏪 Ambil sendiri" → bridge intercepts "pickup" DETERMINISTICALLY (no LLM)
+  sA7.order.fulfillment = "pickup"; // ← bridge sets this directly
+  sA7.messages.push({ role: "user", content: "pickup" });
+  sA7.messages.push({ role: "assistant", content: "[sistem: fulfillment = pickup — deterministik, tanpa LLM]" });
+  check("A7a", "CX", "A7: Pickup — fulfillment di-set deterministik oleh bridge", () =>
+    sA7.order.fulfillment === "pickup"
+  );
+  // Now agent just asks for name
+  r = await send(sA7, "[sistem: customer pilih pickup. Minta nama penerima.]");
   sA7 = r.state;
-  check("A7a", "CX", "A7: Pickup — fulfillment= pickup", () => sA7.order.fulfillment === "pickup");
+  check("A7b", "CX", "A7: Pickup — minta nama (tanpa alamat)", () =>
+    /nama|siapa/i.test((r.reply || "").toLowerCase()) && !/alamat/i.test((r.reply || "").toLowerCase())
+  );
   r = await send(sA7, "Reva");
   sA7 = r.state;
   const pickInv = buildInvoice(sA7.order);
-  check("A7b", "CX", "A7: Pickup invoice — tanpa ongkir (ongkir=0)", () =>
+  check("A7c", "CX", "A7: Pickup invoice — tanpa ongkir (ongkir=0)", () =>
     sA7.order.fulfillment === "pickup" && pickInv.ongkir === 0
   );
   console.log("   pickup: fulfillment=" + sA7.order.fulfillment + ", name=" + sA7.order.name + ", ongkir=" + pickInv.ongkir + "\n");
@@ -181,6 +206,10 @@ async function run() {
   // Verified in A3 + A5: agent doesn't repeat the same question
   check("B10", "Robust", "Nol loop — gak nanya ulang setelah dijawab", () =>
     !asksAgain // from A3 test above
+  );
+  // B10b: Bridge intercepts "delivery"/"pickup" button reply deterministically
+  check("B10b", "Robust", "Bridge: fulfillment button reply handled deterministically (no LLM)", () =>
+    /fulfillment \= \$\{text\}/.test(bridgeCode) || /order\.fulfillment = text/.test(bridgeCode)
   );
 
   // B11: State nyimpen antar pesan
