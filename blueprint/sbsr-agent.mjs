@@ -55,7 +55,9 @@ KLARIFIKASI (Trait #2, sekali aja, jangan muter):
 CHECKOUT (pakai tools — WAJIB TIAP LANGKAH):
 1. Customer cukup → tanya dikirim atau ambil sendiri. Kalau customer jawab "dikirim"/"delivery" atau "ambil sendiri"/"pickup" → WAJIB panggil set_fulfillment.
 2. DELIVERY: setiap customer kasih NAMA → WAJIB panggil set_recipient DULU baru ngomong. Setiap customer kasih ALAMAT → WAJIB panggil set_recipient LAGI. JANGAN cuma bilang "terima kasih [nama]" atau "oke Kak" — SIMPAN DULU nama/alamatnya ke tool, BARU lanjut ngomong.
-3. PICKUP: customer kasih nama → WAJIB set_recipient dulu, baru finalize_order.
+3. SETELAH nama + alamat disimpan untuk delivery → WAJIB minta SHARE LOCATION WhatsApp dulu (sistem yang hitung ongkir). JANGAN panggil finalize_order sebelum lokasi diterima dan ongkir dihitung. JANGAN bilang "mau lanjut bayar?" — ongkir BELUM dihitung! Bilang: "share lokasi Kak, biar dihitung ongkirnya dulu 📍".
+4. PICKUP: customer kasih nama → WAJIB set_recipient dulu, baru finalize_order.
+5. FINALIZE_ORDER HANYA dipanggil kalau SEMUA ini terpenuhi: cart TIDAK kosong + fulfillment SUDAH set + nama SUDAH disimpan + (delivery: alamat SUDAH ada DAN ongkir SUDAH dihitung DAN lokasi SUDAH diterima). Kalau delivery dan ongkir masih 0 → JANGAN finalize, minta lokasi dulu. Sistem yang kirim invoice + QRIS setelah finalize.
 
 PENTING: Kalau customer kirim pesan pendek yang terlihat seperti nama (1-3 kata, tanpa kata kunci menu/makanan/pesanan) saat kamu lagi nunggu nama → itu NAMA, panggil set_recipient. JANGAN tanya "ada yang bisa dibantu?" — itu bukan pertanyaan, itu data yang harus disimpan.
 
@@ -71,7 +73,7 @@ const TOOLS = [
   { type: "function", function: { name: "view_cart", description: "Lihat isi keranjang + subtotal.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "set_fulfillment", description: "Set: dikirim (delivery) atau ambil sendiri (pickup).", parameters: { type: "object", properties: { method: { type: "string", enum: ["delivery", "pickup"] } }, required: ["method"] } } },
   { type: "function", function: { name: "set_recipient", description: "WAJIB dipanggil SETIAP customer memberikan nama atau alamat. Customer kasih nama → panggil dengan name. Customer kasih alamat → panggil lagi dengan address. JANGAN skip — simpan dulu baru lanjut ngomong.", parameters: { type: "object", properties: { name: { type: "string", description: "Nama penerima. Kalau customer kirim 1-3 kata yang terlihat seperti nama orang, itu name." }, address: { type: "string", description: "Alamat lengkap. Hanya untuk delivery." } }, required: ["name"] } } },
-  { type: "function", function: { name: "finalize_order", description: "Customer siap bayar. Hanya kalau cart tidak kosong + fulfillment dipilih + nama (delivery: + alamat) ada.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "finalize_order", description: "Customer siap bayar. HARUS: cart tidak kosong + fulfillment set + nama ada + (delivery: alamat DAN ongkir SUDAH dihitung DAN lokasi SUDAH diterima). Kalau delivery dan ongkir=0 atau lokasi belum ada → JANGAN finalize, minta lokasi dulu.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "escalate_to_human", description: "Serahkan ke admin manusia.", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } } },
 ];
 
