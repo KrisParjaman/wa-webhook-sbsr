@@ -205,6 +205,40 @@ async function quoteOngkir(lat, lng, cart, courierOverride) {
     }
   }
 
+  // ═══ Fallback: retry with "gojek,grab" if primary courier got no results ═══
+  if (couriers !== 'gojek,grab' && couriers !== 'gojek,grab,gosend') {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const res = await fetch("https://api.biteship.com/v1/rates/couriers", {
+        method: "POST",
+        headers: { Authorization: BITESHIP_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin_latitude: ORIGIN.lat, origin_longitude: ORIGIN.lng,
+          destination_latitude: lat, destination_longitude: lng,
+          couriers: "gojek,grab",
+          items: items,
+        }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        const p = (data.pricing || []).filter(x => x.price > 0).sort((a, b) => a.price - b.price)[0];
+        if (p) {
+          return {
+            available: true, ongkir: p.price,
+            eta: p.duration || p.shipment_duration_range || "",
+            courier: (p.courier_name || "") + " " + (p.courier_service_name || ""),
+            distKm: +distKm.toFixed(1),
+            courierInfo: { ...courierInfo, fallback: true },
+            _fallback: true,
+          };
+        }
+      }
+    } catch (_e) { /* fallback also failed, will escalate */ }
+  }
+
   // ═══ Rule 16 + 18: Out of coverage or all retries failed ═══
   return {
     available: false,
