@@ -209,7 +209,7 @@ async function run() {
   );
   // B10b: Bridge intercepts "delivery"/"pickup" button reply deterministically
   check("B10b", "Robust", "Bridge: fulfillment button reply handled deterministically (no LLM)", () =>
-    /fulfillment \= \$\{text\}/.test(bridgeCode) || /order\.fulfillment = text/.test(bridgeCode)
+    /order\.fulfillment = _method/.test(bridgeCode) || /_isDeliveryBtn|_isPickupBtn/.test(bridgeCode)
   );
 
   // B11: State nyimpen antar pesan
