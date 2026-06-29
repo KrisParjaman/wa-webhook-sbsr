@@ -55,6 +55,11 @@ try {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
 
+// --- Agent bridge (blueprint single-agent integration). Never allow to break bot. ---
+let agentBridge = null;
+try { agentBridge = require("./lib/agent-bridge.cjs"); }
+catch (e) { console.error("[agent-bridge] failed to load:", e.message); }
+
 // --- Admin inbox module (chat log + /admin panel). Never allow to break bot. ---
 let admin;
 try { admin = require("./admin.js"); }
@@ -3120,6 +3125,38 @@ function _initEngine() {
     openclawContainer: OPENCLAW_EXEC_CONTAINER,
     receiptBaseUrl: RECEIPT_BASE_URL,
   });
+  // Init agent-bridge (blueprint single-agent)
+  if (agentBridge) {
+    agentBridge.init({
+      sendText: sendWhatsAppMessage,
+      sendImage: function(to, url, caption) {
+        // WhatsApp Cloud API image-by-link (not media ID)
+        return new Promise(function(resolve) {
+          var body = JSON.stringify({
+            messaging_product: "whatsapp", recipient_type: "individual", to: to,
+            type: "image", image: { link: url, caption: caption || "" },
+          });
+          var req = https.request({
+            hostname: "graph.facebook.com",
+            path: "/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages",
+            method: "POST",
+            headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN, "Content-Type": "application/json" },
+          }, function(res) { var d = ""; res.on("data", function(c) { d += c; }); res.on("end", function() { resolve(true); }); });
+          req.on("error", function() { resolve(false); });
+          req.write(body); req.end();
+        });
+      },
+      sendButtons: sendWhatsAppInteractiveButtons,
+      notifyAdmin: notifySbsrAdminsText,
+      log: log,
+      sanitizeUserText: secLib ? secLib.sanitizeUserText : null,
+      costGuard: secLib ? secLib.costGuard : null,
+      perRequestCostUsd: PER_REQUEST_COST_ESTIMATE_USD,
+      adminPhones: getSbsrFinancePhones(),
+      qrisImageUrl: process.env.QRIS_IMAGE_URL || "",
+      agentStateDir: process.env.AGENT_STATE_DIR || path.join(__dirname, "agent-state"),
+    });
+  }
   _engineInited = true;
 }
 
@@ -3185,6 +3222,65 @@ async function handleMessage(msg, contacts) {
 
   if (!await _guardMessage(from, messageId, msg)) return;
   _notifyAdminOnMessage(from, contacts);
+
+  // ── Agent code path (blueprint single-agent, toggle-able) ──────────
+  var _agentEnabled = process.env.SBSR_AGENT_ENABLED === 'true' && agentBridge;
+  var _agentAllowlist = (process.env.SBSR_AGENT_ALLOWLIST || '').split(',').map(function(s) { return s.replace(/[^0-9]/g, ''); }).filter(Boolean);
+  var _useAgent = _agentEnabled && (_agentAllowlist.length === 0 || _agentAllowlist.indexOf(String(from).replace(/[^0-9]/g, '')) !== -1);
+
+  if (_useAgent) {
+    // Check if agent has paused this customer (escalated to human)
+    if (agentBridge.isPaused(from)) {
+      log('agent', 'customer paused (escalated), skip agent for ' + from);
+      return;
+    }
+
+    // Extract + sanitize user text
+    var _agentText = '';
+    if (msg.type === 'text') {
+      var _rawText = (msg.text && msg.text.body) || '';
+      if (secLib) {
+        var _san = secLib.sanitizeUserText(_rawText);
+        if (_san.flags && _san.flags.length) {
+          log('security', from + ' ' + secLib.summarizeFlags(_san));
+        }
+        if (_san.blocked) {
+          try { await sendWhatsAppMessage(from, 'Maaf Kak, pesannya nggak bisa diproses 🙏 coba kirim ulang ya'); } catch (_e) {}
+          return;
+        }
+        _agentText = _san.clean;
+      } else {
+        _agentText = _rawText;
+      }
+    }
+
+    // Log incoming
+    safeLog(admin.logIncoming, from, _agentText || '[' + msg.type + ']', contactName);
+
+    // Admin pause check
+    if (admin && typeof admin.isPaused === 'function' && admin.isPaused(from)) {
+      return;
+    }
+
+    // Typing indicator
+    sendTypingIndicator(from, messageId).catch(function() {});
+
+    try {
+      _initEngine();
+      var _handled = await agentBridge.processTurn(from, _agentText, msg, messageId, contactName);
+      if (_handled) {
+        sendReaction(from, messageId, '').catch(function() {});
+        return;
+      }
+    } catch (_agentErr) {
+      log('agent', 'Error processing agent turn for ' + from + ': ' + (_agentErr.message || _agentErr));
+      try { await sendWhatsAppMessage(from, 'Maaf Kak, ada gangguan sebentar 🙏 Coba lagi ya.'); } catch (_e) {}
+      return;
+    }
+
+    // If agent didn't handle it, fall through to existing pipeline
+    log('agent', 'Agent did not handle, falling through to pipeline for ' + from);
+  }
 
   try {
     _initEngine();
