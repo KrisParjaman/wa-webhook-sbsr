@@ -29,3 +29,12 @@ DEEPSEEK_API_KEY=sk-... node blueprint/sbsr-agent-sim.mjs        # interactive
 1. Webhook → `runAgent({messages, order})` → reply. Persist `messages`+`order` per phone (Postgres = one source of truth).
 2. Add checkout tools: location→ongkir (Biteship), invoice, QRIS, payment-proof→admin.
 3. One instance per number; dedup default-on.
+
+## Full checkout (added)
+- `sbsr-shipping.mjs` — deterministic ongkir (Biteship; distance-estimate fallback) + invoice.
+- `sbsr-agent-bridge.mjs` — production webhook: text→agent, **location→ongkir→invoice→QRIS**,
+  payment image→admin, dedup ON by default, fast ack, per-phone state. Run: `node blueprint/sbsr-agent-bridge.mjs`.
+
+Verified E2E (sim + live DeepSeek): recommend → order (2× Ayam Sayur goreng 6pcs = Rp110.000)
+→ dikirim → nama+alamat → location → ongkir Rp12.000 → invoice **TOTAL Rp122.000** → QRIS →
+payment proof → admin notified. Set `SBSR_ORIGIN_LAT/LNG` to the real store coords before live.
