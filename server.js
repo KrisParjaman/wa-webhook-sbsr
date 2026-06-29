@@ -55,6 +55,11 @@ try {
   console.error("[engine] failed to load modules — running legacy mode:", e.message);
 }
 
+// --- Agent bridge (blueprint single-agent integration). Never allow to break bot. ---
+let agentBridge = null;
+try { agentBridge = require("./lib/agent-bridge.cjs"); }
+catch (e) { console.error("[agent-bridge] failed to load:", e.message); }
+
 // --- Admin inbox module (chat log + /admin panel). Never allow to break bot. ---
 let admin;
 try { admin = require("./admin.js"); }
@@ -1406,7 +1411,7 @@ function formatOCRForBot(){return ocrUtils?ocrUtils.formatForBot.apply(null,argu
 // --- Process incoming message ---
 
 // =====================================================
-// #2 Bridge-level inbound dedup — gated by SBSR_IDEMPOTENT=true (default OFF)
+// #2 Bridge-level inbound dedup — ON by default (set SBSR_IDEMPOTENT=false to disable)
 // =====================================================
 // Catches Meta webhook retries: when bridge takes >5s to ACK, Meta resends the
 // same message_id; without dedup, handleMessage would fire twice and any
@@ -3015,6 +3020,7 @@ function _initEngine() {
   if (_engineInited || !engineCtx) return;
   engineCtx.init({
     SBSR_DRAFTS_DIR,
+    pgPool,
     sendWhatsAppMessage,
     sendWhatsAppCatalog,
     sendWhatsAppLocationRequest,
@@ -3043,6 +3049,31 @@ function _initEngine() {
     pgPool: pgPool,
     log: log,
   });
+  // Reload catalog-pg price cache from Postgres
+  if (pgPool) {
+    try { require('./lib/catalog-pg.cjs').reload(pgPool).catch(function(e){ log('catalog-pg','reload failed: '+e.message); }); } catch(_) {}
+  }
+  // Preload drafts from Postgres into local files (restart recovery, B2)
+  if (pgPool) {
+    pgPool.query("SELECT phone, draft, updated_at FROM wa_drafts WHERE tenant='sbsr' AND updated_at > NOW() - INTERVAL '7 days'")
+      .then(function(res) {
+        var fs2 = require('fs');
+        res.rows.forEach(function(r) {
+          try {
+            var p = SBSR_DRAFTS_DIR + '/' + String(r.phone).replace(/[^0-9]/g,'') + '.json';
+            if (!fs2.existsSync(p)) {
+              fs2.mkdirSync(SBSR_DRAFTS_DIR, { recursive: true });
+              fs2.writeFileSync(p, JSON.stringify({ ...r.draft, updated_at: r.updated_at }, null, 2));
+            }
+          } catch(_) {}
+        });
+        log('drafts-preload', 'synced ' + res.rows.length + ' drafts from Postgres');
+      })
+      .catch(function(e) { log('drafts-preload', 'failed: ' + e.message); });
+    // Clean up expired sessions from Postgres
+    pgPool.query("DELETE FROM wa_drafts WHERE tenant='sbsr' AND updated_at < NOW() - INTERVAL '24 hours' AND (draft->>'state' IS NULL OR draft->>'state' NOT IN ('awaiting_proof','pending_finance','approved','booked','delivered'))")
+      .catch(function(e) { log('drafts-expire', 'cleanup failed: ' + e.message); });
+  }
   // Warm catalog from PostgreSQL, then start Meta API sync
   if (catalogManager && pgPool) {
     catalogManager.warmStoreConfig().catch(function(e) { console.error("[store-config] startup load failed:", e.message); });
@@ -3094,6 +3125,38 @@ function _initEngine() {
     openclawContainer: OPENCLAW_EXEC_CONTAINER,
     receiptBaseUrl: RECEIPT_BASE_URL,
   });
+  // Init agent-bridge (blueprint single-agent)
+  if (agentBridge) {
+    agentBridge.init({
+      sendText: sendWhatsAppMessage,
+      sendImage: function(to, url, caption) {
+        // WhatsApp Cloud API image-by-link (not media ID)
+        return new Promise(function(resolve) {
+          var body = JSON.stringify({
+            messaging_product: "whatsapp", recipient_type: "individual", to: to,
+            type: "image", image: { link: url, caption: caption || "" },
+          });
+          var req = https.request({
+            hostname: "graph.facebook.com",
+            path: "/" + WA_API_VERSION + "/" + WA_PHONE_NUMBER_ID + "/messages",
+            method: "POST",
+            headers: { Authorization: "Bearer " + WA_ACCESS_TOKEN, "Content-Type": "application/json" },
+          }, function(res) { var d = ""; res.on("data", function(c) { d += c; }); res.on("end", function() { resolve(true); }); });
+          req.on("error", function() { resolve(false); });
+          req.write(body); req.end();
+        });
+      },
+      sendButtons: sendWhatsAppInteractiveButtons,
+      notifyAdmin: notifySbsrAdminsText,
+      log: log,
+      sanitizeUserText: secLib ? secLib.sanitizeUserText : null,
+      costGuard: secLib ? secLib.costGuard : null,
+      perRequestCostUsd: PER_REQUEST_COST_ESTIMATE_USD,
+      adminPhones: getSbsrFinancePhones(),
+      qrisImageUrl: process.env.QRIS_IMAGE_URL || "",
+      agentStateDir: process.env.AGENT_STATE_DIR || path.join(__dirname, "agent-state"),
+    });
+  }
   _engineInited = true;
 }
 
@@ -3159,6 +3222,65 @@ async function handleMessage(msg, contacts) {
 
   if (!await _guardMessage(from, messageId, msg)) return;
   _notifyAdminOnMessage(from, contacts);
+
+  // ── Agent code path (blueprint single-agent, toggle-able) ──────────
+  var _agentEnabled = process.env.SBSR_AGENT_ENABLED === 'true' && agentBridge;
+  var _agentAllowlist = (process.env.SBSR_AGENT_ALLOWLIST || '').split(',').map(function(s) { return s.replace(/[^0-9]/g, ''); }).filter(Boolean);
+  var _useAgent = _agentEnabled && (_agentAllowlist.length === 0 || _agentAllowlist.indexOf(String(from).replace(/[^0-9]/g, '')) !== -1);
+
+  if (_useAgent) {
+    // Check if agent has paused this customer (escalated to human)
+    if (agentBridge.isPaused(from)) {
+      log('agent', 'customer paused (escalated), skip agent for ' + from);
+      return;
+    }
+
+    // Extract + sanitize user text
+    var _agentText = '';
+    if (msg.type === 'text') {
+      var _rawText = (msg.text && msg.text.body) || '';
+      if (secLib) {
+        var _san = secLib.sanitizeUserText(_rawText);
+        if (_san.flags && _san.flags.length) {
+          log('security', from + ' ' + secLib.summarizeFlags(_san));
+        }
+        if (_san.blocked) {
+          try { await sendWhatsAppMessage(from, 'Maaf Kak, pesannya nggak bisa diproses 🙏 coba kirim ulang ya'); } catch (_e) {}
+          return;
+        }
+        _agentText = _san.clean;
+      } else {
+        _agentText = _rawText;
+      }
+    }
+
+    // Log incoming
+    safeLog(admin.logIncoming, from, _agentText || '[' + msg.type + ']', contactName);
+
+    // Admin pause check
+    if (admin && typeof admin.isPaused === 'function' && admin.isPaused(from)) {
+      return;
+    }
+
+    // Typing indicator
+    sendTypingIndicator(from, messageId).catch(function() {});
+
+    try {
+      _initEngine();
+      var _handled = await agentBridge.processTurn(from, _agentText, msg, messageId, contactName);
+      if (_handled) {
+        sendReaction(from, messageId, '').catch(function() {});
+        return;
+      }
+    } catch (_agentErr) {
+      log('agent', 'Error processing agent turn for ' + from + ': ' + (_agentErr.message || _agentErr));
+      try { await sendWhatsAppMessage(from, 'Maaf Kak, ada gangguan sebentar 🙏 Coba lagi ya.'); } catch (_e) {}
+      return;
+    }
+
+    // If agent didn't handle it, fall through to existing pipeline
+    log('agent', 'Agent did not handle, falling through to pipeline for ' + from);
+  }
 
   try {
     _initEngine();
