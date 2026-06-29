@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SBSR Bot — Task Board (Adit)</title>
+<style>
+  :root{--bg:#faf8f5;--card:#fff;--ink:#222;--muted:#6b6b6b;--line:#ececec;
+    --red:#c0392b;--orange:#c2410c;--green:#2e7d4f;--blue:#1a4b86;--reva:#6b46c1;--kris:#0e7490;
+    --soft:#fbf3ee;--redbg:#fdeeec;--greenbg:#eef6f0;}
+  *{box-sizing:border-box;} body{margin:0;background:var(--bg);color:var(--ink);line-height:1.55;padding:24px 16px;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:860px;margin:0 auto;}
+  h1{font-size:1.5rem;margin:0 0 2px;} .meta{color:var(--muted);font-size:.84rem;margin-bottom:16px;}
+  .decision{background:var(--greenbg);border-left:4px solid var(--green);padding:12px 15px;border-radius:8px;margin-bottom:16px;font-size:.95rem;}
+  .decision b{color:#1c5e38;}
+  h2{font-size:1.05rem;margin:18px 0 8px;padding-bottom:5px;border-bottom:2px solid var(--line);}
+  .task{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:12px 14px;margin-bottom:10px;}
+  .task .top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
+  .id{font-weight:800;font-size:.95rem;}
+  .who{font-size:.74rem;font-weight:800;color:#fff;padding:2px 9px;border-radius:20px;}
+  .reva{background:var(--reva);} .kris{background:var(--kris);} .both{background:#555;}
+  .due{font-size:.78rem;color:var(--muted);font-weight:700;}
+  .task p{margin:6px 0 0;font-size:.9rem;}
+  .dod{background:var(--soft);border-radius:7px;padding:6px 10px;margin-top:7px;font-size:.85rem;}
+  .dod b{color:var(--green);}
+  .hot{border-left:4px solid var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:.9rem;margin-top:4px;}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);} th{font-size:.72rem;text-transform:uppercase;color:var(--muted);}
+  td.ok{color:var(--green);font-weight:700;}
+  .cadence{background:#f4f7fb;border:1px solid #dde6f2;border-radius:11px;padding:13px 15px;margin-top:10px;}
+  code{background:#eef0f3;padding:1px 6px;border-radius:5px;font-size:.84rem;}
+  footer{color:var(--muted);font-size:.8rem;text-align:center;margin-top:20px;}
+  .legend span{font-size:.78rem;font-weight:700;color:#fff;padding:2px 9px;border-radius:20px;margin-right:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>🍴 SBSR Bot — Task Board</h1>
+  <div class="meta">Tech lead: Adit · Senin 29 Jun 2026 · target live: Jumat · <span class="legend"><span class="reva">Reva</span><span class="kris">Kris</span><span class="both">Both</span></span></div>
+
+  <div class="decision">
+    <b>KEPUTUSAN (final, no debat):</b> stop nambal classifier+template. Kita <b>rebuild ke pola single-agent + tools</b> (otak satu, state satu, LLM yang ngomong, tools yang pegang uang) — pola yang udah terbukti di Rosalie <code>rearch/agent</code>.
+    <br><b>Blueprint udah jadi & udah dites:</b> <code>sbsr-agent/</code> (sbsr-catalog + sbsr-agent + sim). Tinggal di-integrate ke webhook + Postgres. Jangan mulai dari nol.
+  </div>
+
+  <p style="font-size:.9rem;background:var(--redbg);border-left:4px solid var(--red);padding:9px 13px;border-radius:8px;">
+    <b>Kenapa rebuild, bukan nambal:</b> bug di screenshot (gak ngerti "favorit", "6pcs" jadi "3pcs", gak bisa baca cart sendiri) itu <b>bawaan arsitektur classifier+template</b> — gak bisa jualan, gak inget cart, jatuh ke sapaan kalau miss. Ditambal pun balik lagi. Pola agent menghilangkan kelasnya, bukan kasusnya.
+  </p>
+
+  <h2>🔥 Track A — Stop the bleeding (HARI INI)</h2>
+  <div class="task hot">
+    <div class="top"><span class="id">A1 · Katalog = sumber kebenaran (sesuai menu asli)</span><span class="who kris">Kris</span><span class="due">⏰ hari ini EOD</span></div>
+    <p>Katalog di kode HARUS sama persis dengan menu asli: Goreng 3/6/12 pcs, Frozen 6 pcs, 5 varian + harga benar. (Kode lama cuma punya 6/12 → makanya "6pcs" jadi "3pcs".) Pakai <code>sbsr-agent/sbsr-catalog.mjs</code> sebagai acuan.</p>
+    <div class="dod"><b>DoD:</b> "Risol ayam 6pcs goreng" → quote <b>Rp55.000</b> (bukan Rp29.000).</div>
+  </div>
+  <div class="task hot">
+    <div class="top"><span class="id">A2 · Satu instance + dedup ON</span><span class="who kris">Kris</span><span class="due">⏰ hari ini EOD</span></div>
+    <p>Set <code>SBSR_IDEMPOTENT=true</code> (jadikan default-ON di kode), dan pastikan cuma SATU instance yang kewire ke nomor.</p>
+    <div class="dod"><b>DoD:</b> nggak ada pesan dobel pas dites.</div>
+  </div>
+
+  <h2>🏗️ Track B — Rebuild single-agent (mirror <code>sbsr-agent/</code>)</h2>
+  <div class="task">
+    <div class="top"><span class="id">B1 · Agent + cart tools jalan di webhook</span><span class="who reva">Reva</span><span class="due">⏰ Selasa EOD</span></div>
+    <p>Integrate <code>sbsr-agent.mjs</code> (persona = customer-service-excellence + product knowledge; tools add/view/update/remove cart, klarifikasi goreng/frozen sekali). Webhook → runAgent → reply.</p>
+    <div class="dod"><b>DoD (sim/test number):</b> "favorit" → rekomendasi nyata · "ayam 6pcs" → nanya goreng/frozen → harga benar · "pesanan saya apa aja" → list cart.</div>
+  </div>
+  <div class="task">
+    <div class="top"><span class="id">B2 · State satu sumber (Postgres) per nomor</span><span class="who kris">Kris</span><span class="due">⏰ Selasa EOD</span></div>
+    <p>Satu objek order per phone (messages + cart + recipient) di Postgres = SATU sumber kebenaran agent. Tidak ada state paralel/deterministik lain. Auto-expire sesi lama (biar chat kemarin gak nempel).</p>
+    <div class="dod"><b>DoD:</b> cart bertahan antar pesan; reset bersih; gak ada split-brain.</div>
+  </div>
+  <div class="task">
+    <div class="top"><span class="id">B3 · Checkout tools (ongkir, invoice, QRIS)</span><span class="who reva">Reva</span><span class="due">⏰ Rabu EOD</span></div>
+    <p>Tools: set_recipient, location→ongkir (Biteship, deterministik), invoice (subtotal+ongkir+total), QRIS, bukti bayar → admin verify, escalate_to_human. LLM nggak pernah hitung uang.</p>
+    <div class="dod"><b>DoD:</b> sim checkout penuh → invoice angka benar → QRIS.</div>
+  </div>
+  <div class="task">
+    <div class="top"><span class="id">B4 · E2E test di nomor test + edge cases</span><span class="who both">Both</span><span class="due">⏰ Kamis EOD</span></div>
+    <p>Tes semua acceptance criteria di bawah + edge: ganti pesanan, frustrasi→manusia, goreng/frozen ditanya SEKALI, pesan dobel = 0.</p>
+    <div class="dod"><b>DoD:</b> semua acceptance criteria lolos, bukti di grup.</div>
+  </div>
+  <div class="task">
+    <div class="top"><span class="id">B5 · Cutover ke produksi</span><span class="who kris">Kris</span><span class="due">⏰ Jumat</span></div>
+    <p>Arahin webhook produksi → agent baru (satu instance), matiin yang lama, monitor.</p>
+    <div class="dod"><b>DoD:</b> nomor produksi jalan di agent baru, dipantau 1 hari.</div>
+  </div>
+
+  <h2>✅ Acceptance Criteria (standar kualitas — wajib semua lolos)</h2>
+  <table>
+    <tr><th>#</th><th>Skenario</th><th>Harus</th></tr>
+    <tr><td>1</td><td>"apa yang favorit?"</td><td class="ok">rekomendasi nyata + jualan (bukan sapaan)</td></tr>
+    <tr><td>2</td><td>"Risol ayam 6pcs goreng"</td><td class="ok">Ayam Sayur goreng 6pcs = Rp55.000</td></tr>
+    <tr><td>3</td><td>"pesanan saya apa aja?"</td><td class="ok">list item akurat</td></tr>
+    <tr><td>4</td><td>"tambah X" di tengah</td><td class="ok">nambah, cart utuh</td></tr>
+    <tr><td>5</td><td>ambigu goreng/frozen</td><td class="ok">ditanya SEKALI, lalu disimpan</td></tr>
+    <tr><td>6</td><td>customer kesal / minta manusia</td><td class="ok">handoff ke admin</td></tr>
+    <tr><td>7</td><td>retry WhatsApp</td><td class="ok">nol pesan dobel</td></tr>
+  </table>
+
+  <div class="cadence">
+    <b>📋 Cara update (ganti update satu-satu):</b> tiap hari jam <b>17.00</b>, Reva &amp; Kris masing-masing kirim 3 baris di grup:
+    <br>1) <b>Selesai</b> + bukti (transkrip sim / screenshot nomor test) · 2) <b>Blocker</b> · 3) <b>Next</b>.
+    <br>Kalau nggak ada bukti = belum selesai. Adit review tiap milestone lawan DoD di atas.
+  </div>
+
+  <footer>Blueprint kerja: <code>sbsr-agent/</code> (udah dites live, semua bug screenshot beres). Mirror itu, jangan mulai dari nol. 🍴</footer>
+
+</div>
+</body>
+</html>
