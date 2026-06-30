@@ -137,18 +137,30 @@ async function callGeminiLLM(messages) {
 }
 
 function sanitizeMessages(msgs) {
-  // Remove orphan tool messages that have no preceding assistant message with tool_calls.
-  // DeepSeek 400s if role:"tool" appears without a matching tool_calls in the prior message.
-  const out = [];
+  // Fix two classes of corrupt message sequences that cause DeepSeek 400:
+  // 1. role:"tool" with no preceding assistant tool_calls  → drop the tool message
+  // 2. role:"assistant" with tool_calls but no following tool response → drop the assistant message
+  let out = [];
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
+    // Drop orphan tool message (no preceding assistant tool_calls)
     if (m.role === "tool") {
       const prev = out[out.length - 1];
       if (!prev || prev.role !== "assistant" || !prev.tool_calls || !prev.tool_calls.length) continue;
     }
     out.push(m);
   }
-  return out;
+  // Drop assistant tool_calls messages not followed by a tool response
+  const clean = [];
+  for (let i = 0; i < out.length; i++) {
+    const m = out[i];
+    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length) {
+      const next = out[i + 1];
+      if (!next || next.role !== "tool") continue; // drop dangling tool_calls
+    }
+    clean.push(m);
+  }
+  return clean;
 }
 
 export async function runAgent(state, userText) {
