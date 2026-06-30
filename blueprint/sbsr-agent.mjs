@@ -133,7 +133,7 @@ export async function runAgent(state, userText) {
   if (!DS_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
   for (let i = 0; i < 5; i++) {
     let msg;
-    try { msg = await callLLM(messages); } catch (e) { return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e).slice(0, 120) }; }
+    try { msg = await callLLM(messages); } catch (e) { console.error('[sbsr-agent] callLLM error (attempt ' + i + '):', String(e)); return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e).slice(0, 120) }; }
     messages.push(msg);
     if (msg.tool_calls && msg.tool_calls.length) {
       for (const tc of msg.tool_calls) { let a = {}; try { a = JSON.parse(tc.function.arguments || "{}"); } catch {} messages.push({ role: "tool", tool_call_id: tc.id, content: runTool(tc.function.name, a, order) }); }
