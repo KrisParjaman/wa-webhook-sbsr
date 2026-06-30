@@ -71,7 +71,8 @@ const TOOLS = [
   { type: "function", function: { name: "set_fulfillment", description: "Set: dikirim (delivery) atau ambil sendiri (pickup).", parameters: { type: "object", properties: { method: { type: "string", enum: ["delivery", "pickup"] } }, required: ["method"] } } },
   { type: "function", function: { name: "set_recipient", description: "WAJIB dipanggil SETIAP customer memberikan nama atau alamat. Customer kasih nama → panggil dengan name. Customer kasih alamat → panggil lagi dengan address. JANGAN skip — simpan dulu baru lanjut ngomong.", parameters: { type: "object", properties: { name: { type: "string", description: "Nama penerima. Kalau customer kirim 1-3 kata yang terlihat seperti nama orang, itu name." }, address: { type: "string", description: "Alamat lengkap. Hanya untuk delivery." } }, required: ["name"] } } },
   { type: "function", function: { name: "finalize_order", description: "Customer siap bayar. HARUS: cart tidak kosong + fulfillment set + nama ada + (delivery: alamat DAN ongkir SUDAH dihitung DAN lokasi SUDAH diterima). Kalau delivery dan ongkir=0 atau lokasi belum ada → JANGAN finalize, minta lokasi dulu.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "escalate_to_human", description: "Serahkan ke admin manusia.", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } } },
+  { type: "function", function: { name: "resend_qris", description: "Kirim ulang invoice dan QRIS ke customer. Pakai saat customer bilang QRIS belum diterima, terhapus, hilang, atau minta dikirim ulang. JANGAN escalate_to_human untuk kasus ini — pakai tool ini.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "escalate_to_human", description: "Serahkan ke admin manusia. JANGAN pakai untuk minta kirim ulang QRIS/invoice — gunakan resend_qris.", parameters: { type: "object", properties: { reason: { type: "string" } }, required: ["reason"] } } },
 ];
 
 function subtotal(cart) { return (cart || []).reduce((s, i) => s + i.price * i.qty, 0); }
@@ -111,6 +112,9 @@ function runTool(name, args, order) {
       if (!order.name) return JSON.stringify({ ok: false, error: "belum ada nama" });
       if (order.fulfillment === "delivery" && !order.address) return JSON.stringify({ ok: false, error: "belum ada alamat" });
       order.finalize = true; return JSON.stringify({ ok: true, note: "sistem kirim invoice + QRIS." });
+    case "resend_qris":
+      if (!order.cart || !order.cart.length) return JSON.stringify({ ok: false, error: "tidak ada pesanan aktif untuk dikirim ulang" });
+      order.finalize = true; return JSON.stringify({ ok: true, note: "sistem kirim ulang invoice + QRIS." });
     case "escalate_to_human": order.escalate = args.reason || "frustration"; return JSON.stringify({ ok: true, escalated: true });
     default: return JSON.stringify({ ok: false, error: "unknown tool" });
   }
