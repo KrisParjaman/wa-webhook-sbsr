@@ -124,16 +124,59 @@ async function callLLM(messages) {
   return (await res.json()).choices[0].message;
 }
 
+const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_MODEL = "gemini-2.0-flash";
+
+async function callGeminiLLM(messages) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 30000);
+  const res = await fetch(GEMINI_URL, { method: "POST", headers: { Authorization: "Bearer " + GEMINI_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ model: GEMINI_MODEL, messages, tools: TOOLS, temperature: 0.5, max_tokens: 500 }), signal: ctrl.signal });
+  clearTimeout(t);
+  if (!res.ok) throw new Error("Gemini " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 200));
+  return (await res.json()).choices[0].message;
+}
+
+function sanitizeMessages(msgs) {
+  // Remove orphan tool messages that have no preceding assistant message with tool_calls.
+  // DeepSeek 400s if role:"tool" appears without a matching tool_calls in the prior message.
+  const out = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === "tool") {
+      const prev = out[out.length - 1];
+      if (!prev || prev.role !== "assistant" || !prev.tool_calls || !prev.tool_calls.length) continue;
+    }
+    out.push(m);
+  }
+  return out;
+}
+
 export async function runAgent(state, userText) {
   const order = state.order || { cart: [] };
   let messages = state.messages && state.messages.length && state.messages[0]?.role === "system"
     ? state.messages
     : [{ role: "system", content: SYSTEM_PROMPT }, ...(state.messages || [])];
+  messages = sanitizeMessages(messages);
   if (userText) messages.push({ role: "user", content: userText });
-  if (!DS_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
+  if (!DS_KEY && !GEMINI_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
   for (let i = 0; i < 5; i++) {
     let msg;
-    try { msg = await callLLM(messages); } catch (e) { console.error('[sbsr-agent] callLLM error (attempt ' + i + '):', String(e)); return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e).slice(0, 120) }; }
+    try {
+      msg = DS_KEY ? await callLLM(messages) : await callGeminiLLM(messages);
+    } catch (e) {
+      console.error('[sbsr-agent] DeepSeek error (attempt ' + i + '):', String(e));
+      if (GEMINI_KEY) {
+        try {
+          console.error('[sbsr-agent] falling back to Gemini...');
+          msg = await callGeminiLLM(messages);
+        } catch (e2) {
+          console.error('[sbsr-agent] Gemini fallback also failed:', String(e2));
+          return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e2).slice(0, 120) };
+        }
+      } else {
+        return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e).slice(0, 120) };
+      }
+    }
     messages.push(msg);
     if (msg.tool_calls && msg.tool_calls.length) {
       for (const tc of msg.tool_calls) { let a = {}; try { a = JSON.parse(tc.function.arguments || "{}"); } catch {} messages.push({ role: "tool", tool_call_id: tc.id, content: runTool(tc.function.name, a, order) }); }
