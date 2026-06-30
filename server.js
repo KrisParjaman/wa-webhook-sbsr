@@ -3166,6 +3166,7 @@ function _initEngine() {
         return mapsGeocode.resolveGmapsUrlBridge(m[1]);
       },
       notifyAdmin: notifySbsrAdminsText,
+      notifyAdminWithButtons: notifyPaymentProofAdmins,
       log: log,
       sanitizeUserText: secLib ? secLib.sanitizeUserText : null,
       costGuard: secLib ? secLib.costGuard : null,
