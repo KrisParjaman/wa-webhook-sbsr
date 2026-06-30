@@ -124,15 +124,15 @@ async function callLLM(messages) {
   return (await res.json()).choices[0].message;
 }
 
-const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const GEMINI_MODEL = "gemini-2.0-flash";
+const OR_KEY = process.env.OPENROUTER_API_KEY || "";
+const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OR_MODEL = "deepseek/deepseek-chat";
 
-async function callGeminiLLM(messages) {
+async function callFallbackLLM(messages) {
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 30000);
-  const res = await fetch(GEMINI_URL, { method: "POST", headers: { Authorization: "Bearer " + GEMINI_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ model: GEMINI_MODEL, messages, tools: TOOLS, temperature: 0.5, max_tokens: 500 }), signal: ctrl.signal });
+  const res = await fetch(OR_URL, { method: "POST", headers: { Authorization: "Bearer " + OR_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ model: OR_MODEL, messages, tools: TOOLS, temperature: 0.5, max_tokens: 500 }), signal: ctrl.signal });
   clearTimeout(t);
-  if (!res.ok) throw new Error("Gemini " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 200));
+  if (!res.ok) throw new Error("OpenRouter " + res.status + ": " + (await res.text().catch(() => "")).slice(0, 200));
   return (await res.json()).choices[0].message;
 }
 
@@ -170,19 +170,19 @@ export async function runAgent(state, userText) {
     : [{ role: "system", content: SYSTEM_PROMPT }, ...(state.messages || [])];
   messages = sanitizeMessages(messages);
   if (userText) messages.push({ role: "user", content: userText });
-  if (!DS_KEY && !GEMINI_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
+  if (!DS_KEY && !OR_KEY) return { reply: "Maaf Kak, sistem lagi gangguan sebentar 🙏", order, messages };
   for (let i = 0; i < 5; i++) {
     let msg;
     try {
-      msg = DS_KEY ? await callLLM(messages) : await callGeminiLLM(messages);
+      msg = DS_KEY ? await callLLM(messages) : await callFallbackLLM(messages);
     } catch (e) {
       console.error('[sbsr-agent] DeepSeek error (attempt ' + i + '):', String(e));
-      if (GEMINI_KEY) {
+      if (OR_KEY) {
         try {
-          console.error('[sbsr-agent] falling back to Gemini...');
-          msg = await callGeminiLLM(messages);
+          console.error('[sbsr-agent] falling back to OpenRouter...');
+          msg = await callFallbackLLM(messages);
         } catch (e2) {
-          console.error('[sbsr-agent] Gemini fallback also failed:', String(e2));
+          console.error('[sbsr-agent] OpenRouter fallback also failed:', String(e2));
           return { reply: "Maaf Kak, koneksi lagi lambat 🙏 boleh diulang?", order, messages, error: String(e2).slice(0, 120) };
         }
       } else {
